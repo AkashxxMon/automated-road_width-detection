@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+cache/
+*.tmp.geojson
+*.tmp.csv
+model/
+output/
+shared/*.geojson
+validation/*geojson
+input/*.geojson
+input/*.kmz

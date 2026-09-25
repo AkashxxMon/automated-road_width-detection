@@ -1,0 +1,21 @@
+geopandas
+shapely
+pyproj
+fiona
+pyogrio
+pyarrow
+networkx
+osmnx
+folium
+requests
+pillow
+numpy
+# torch/torchvision: install separately for GPU support, e.g.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# (plain `pip install torch` from this file pulls CPU-only wheels - SAM2 will
+# still run, just much slower)
+torch
+torchvision
+sam2
+huggingface_hub
+transformers>=5.17  # needed for Sam3Model/Sam3Processor (measure_width_sam3.py)
