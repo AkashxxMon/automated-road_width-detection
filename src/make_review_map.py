@@ -25,7 +25,7 @@ import pandas as pd
 from folium.plugins import MeasureControl
 
 CROSSINGS_BASE = "output/gujarat_crossings.geojson"
-CROSSINGS_FINAL = "output/gujarat_crossings_final.geojson"  # written by src/measure_width_sam3.py, if it's been run
+CROSSINGS_FINAL = "output/gujarat_crossings_final_gl.geojson"  # written by src/measure_width_sam3.py, if it's been run
 ALIGNMENT = "shared/alignment_gujarat.geojson"
 VALIDATION = "output/gujarat_validation.geojson"  # optional - written by src/validate.py
 OUT_HTML = "output/gujarat_review_map.html"

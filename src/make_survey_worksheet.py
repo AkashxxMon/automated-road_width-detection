@@ -21,7 +21,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
-CROSSINGS_FINAL = "output/gujarat_crossings_final.geojson"
+CROSSINGS_FINAL = "output/gujarat_crossings_final_gl.geojson"
 CROSSINGS_BASE = "output/gujarat_crossings.geojson"
 OUT_CSV = "output/gujarat_width_recheck.csv"
 
