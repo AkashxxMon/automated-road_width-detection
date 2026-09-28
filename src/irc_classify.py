@@ -1,23 +1,13 @@
-"""Road hierarchy: OSM highway/ref tags -> IRC class -> design roadway width.
+"""Road hierarchy: OSM highway/ref tags -> IRC class.
 
-IRC:73 roadway widths (plain/rolling terrain, open areas). Cross-check
-against the current IRC:73 revision and the project's own spec before
-release - see the Sources section of the project brief.
+The IRC class no longer sets the design width (that comes from the SAM3
+measurement only, in measure_width_sam3.py) - it's kept purely to flag a
+measurement as SUSPECT when it's implausible for that class of road (e.g.
+a "village road" mask that's actually 20m wide almost certainly bled into
+a field), so a reviewer knows to check it rather than trust it blindly.
 """
 
 from __future__ import annotations
-
-# name, IRC roadway width in m (None = connectivity rule / measurement decides)
-IRC = {
-    "EXP": ("Expressway", None),
-    "NH": ("National Highway", 12.0),
-    "SH": ("State Highway", 12.0),
-    "MDR": ("Major District Road", 9.0),
-    "ODR": ("Other District Road", 7.5),
-    "VR": ("Village Road", 7.5),
-    "TRK": ("Cart track / field access", None),
-    "PTH": ("Footpath", None),
-}
 
 _HIGHWAY_TO_IRC = {
     "motorway": "EXP", "motorway_link": "EXP",
@@ -29,6 +19,7 @@ _HIGHWAY_TO_IRC = {
     "track": "TRK",
     "path": "PTH", "footway": "PTH",
 }
+
 
 def classify(highway: str | None, ref: str | None) -> str:
     """OSM ref tags (NH-/SH- numbers) override the highway-tag guess."""
@@ -45,13 +36,9 @@ def classify(highway: str | None, ref: str | None) -> str:
     return _HIGHWAY_TO_IRC.get(highway, "TRK")
 
 
-def roadway_width(irc_class: str) -> float | None:
-    return IRC.get(irc_class, (None, None))[1]
-
-
-# rough sanity envelope for an automated width measurement, independent of
-# the IRC design minimum - used only to flag an implausible SAM2 mask
-# (e.g. bled into a field, or collapsed to a sliver), not as a design value
+# rough sanity envelope for an automated width measurement - used only to
+# flag an implausible SAM3 mask (e.g. bled into a field, or collapsed to a
+# sliver) for review, never to set or override the design value itself
 PLAUSIBLE_RANGE_M = {
     "EXP": (7.0, 40.0), "NH": (5.0, 25.0), "SH": (5.0, 25.0),
     "MDR": (3.5, 20.0), "ODR": (2.5, 15.0), "VR": (2.0, 12.0),

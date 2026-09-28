@@ -17,7 +17,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 TRANSECT_OFFSETS_M = (-20, -10, 0, 10, 20)
-MAX_PLAUSIBLE_WIDTH_M = 40.0  # wider than that is almost certainly the mask leaking into a field
+MAX_PLAUSIBLE_WIDTH_M = 60.0  # wider than that is almost certainly the mask leaking into a field
 
 
 def bearing_deg(p0, p1) -> float:
@@ -37,33 +37,50 @@ def road_tangent_bearing(roads_sindex, roads: gpd.GeoDataFrame, pt_utm) -> float
     return bearing_deg((p.x, p.y), (q.x, q.y))
 
 
-def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: tuple[float, float]) -> list[float]:
+MAX_SNAP_M = 25.0  # how far off-road the OSM-derived crossing point is allowed to be before we give up
+                   # finding the real road in the mask - rural OSM traces are commonly this far off
+                   # from the true (imagery-visible) road position, this is not a bug, just data noise
+
+
+def _nearest_mask_pixel(mask: np.ndarray, cx: float, cy: float, max_radius_px: int) -> tuple[int, int] | None:
+    """Nearest True pixel to (cx, cy) within max_radius_px, searched in every
+    direction (not just vertically) - handles the road sitting anywhere near
+    the expected point, not just above/below it."""
+    h, w = mask.shape
+    cxi, cyi = int(round(cx)), int(round(cy))
+    if 0 <= cyi < h and 0 <= cxi < w and mask[cyi, cxi]:
+        return cxi, cyi
+    y0, y1 = max(cyi - max_radius_px, 0), min(cyi + max_radius_px + 1, h)
+    x0, x1 = max(cxi - max_radius_px, 0), min(cxi + max_radius_px + 1, w)
+    if y1 <= y0 or x1 <= x0:
+        return None
+    sub = mask[y0:y1, x0:x1]
+    ys, xs = np.nonzero(sub)
+    if len(xs) == 0:
+        return None
+    ys, xs = ys + y0, xs + x0
+    d2 = (xs - cx) ** 2 + (ys - cy) ** 2
+    idx = np.argmin(d2)
+    return int(xs[idx]), int(ys[idx])
+
+
+def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: tuple[float, float],
+                       max_snap_m: float = MAX_SNAP_M) -> list[float]:
     h, w = mask.shape
     brg = math.radians(bearing)
     perp = brg + math.pi / 2
     dx_perp, dy_perp = math.sin(perp), math.cos(perp)  # bearing: 0=north(+y up in world, -y in image)
     dx_along, dy_along = math.sin(brg), math.cos(brg)
+    max_radius_px = max(1, int(round(max_snap_m / mpp)))
 
     widths = []
     for off in TRANSECT_OFFSETS_M:
         cx = center_px[0] + (off * dx_along) / mpp
         cy = center_px[1] - (off * dy_along) / mpp
-        cxi, cyi = int(round(cx)), int(round(cy))
-        if not (0 <= cxi < w and 0 <= cyi < h):
+        snapped = _nearest_mask_pixel(mask, cx, cy, max_radius_px)
+        if snapped is None:
             continue
-        if not mask[cyi, cxi]:
-            found = False
-            for r in range(1, 6):
-                for s in (-1, 1):
-                    yy = cyi + s * r
-                    if 0 <= yy < h and mask[yy, cxi]:
-                        cyi = yy
-                        found = True
-                        break
-                if found:
-                    break
-            if not found:
-                continue
+        cx, cy = snapped
 
         pos = neg = 0
         step = 0
@@ -89,7 +106,8 @@ def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: t
 
 
 def save_qa_image(path: Path, rgb: np.ndarray, mask: np.ndarray | None, bearing: float,
-                   mpp: float, center_px: tuple[float, float], widths: list[float]) -> None:
+                   mpp: float, center_px: tuple[float, float], widths: list[float],
+                   max_snap_m: float = MAX_SNAP_M) -> None:
     img = Image.fromarray(rgb).convert("RGBA")
     if mask is not None:
         overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
@@ -100,12 +118,21 @@ def save_qa_image(path: Path, rgb: np.ndarray, mask: np.ndarray | None, bearing:
     perp = brg + math.pi / 2
     dx_perp, dy_perp = math.sin(perp), math.cos(perp)
     dx_along, dy_along = math.sin(brg), math.cos(brg)
+    max_radius_px = max(1, int(round(max_snap_m / mpp)))
     for off in TRANSECT_OFFSETS_M:
         cx = center_px[0] + (off * dx_along) / mpp
         cy = center_px[1] - (off * dy_along) / mpp
         x0, y0 = cx - 25 * dx_perp, cy + 25 * dy_perp
         x1, y1 = cx + 25 * dx_perp, cy - 25 * dy_perp
         draw.line([(x0, y0), (x1, y1)], fill=(255, 255, 0, 255), width=1)
+        # small green dot where this transect actually snapped to on the mask, if
+        # it differs from the naive OSM-derived point - makes an OSM/imagery
+        # position offset (the road sitting away from the expected point) visible
+        if mask is not None:
+            snapped = _nearest_mask_pixel(mask, cx, cy, max_radius_px)
+            if snapped is not None and (abs(snapped[0] - cx) > 2 or abs(snapped[1] - cy) > 2):
+                sx, sy = snapped
+                draw.ellipse([sx - 3, sy - 3, sx + 3, sy + 3], fill=(0, 255, 0, 255))
     r = 4
     draw.ellipse([center_px[0] - r, center_px[1] - r, center_px[0] + r, center_px[1] + r], outline=(0, 255, 255, 255), width=2)
     label = f"{np.median(widths):.1f} m (n={len(widths)})" if widths else "no measurement"

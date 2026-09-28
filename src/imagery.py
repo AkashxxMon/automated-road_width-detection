@@ -20,7 +20,8 @@ import numpy as np
 import requests
 from PIL import Image
 
-TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+# TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+TILE_URL = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 TILE_SIZE = 256
 PLACEHOLDER_MAX_BYTES = 6000  # "Map data not yet available" tiles are small flat-grey JPEGs
 DEFAULT_ZOOM_CANDIDATES = (19, 18, 17, 16)

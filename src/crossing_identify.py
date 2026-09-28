@@ -1,9 +1,11 @@
 """One command: clip a rail/road alignment to a boundary (optional), fetch
 the OpenStreetMap road network for a corridor around it, and find every
 point where a road crosses the alignment - chainage, crossing angle, IRC
-road class, the connectivity/dead-end rule (R1-R4), and design width/span
-from the IRC minimum (stage 6 - automated width measurement from imagery -
-is a separate step, see measure_width_sam3.py).
+road class, and the connectivity/dead-end rule (R1-R4). The IRC class
+assigned here is used later only to flag an implausible measurement for
+review - design width/span come entirely from the SAM3 measurement
+(stage 6, a separate step - see measure_width_sam3.py), not from an IRC
+minimum.
 
 Nothing about the project area is hardcoded: the alignment file, the
 clip boundary, the corridor width, the output CRS and every rule
@@ -31,7 +33,7 @@ from shapely.geometry import Point
 from shapely.ops import split, unary_union
 
 from geo_utils import flatten_geom, get_utm_epsg, write_csv, write_geojson
-from irc_classify import classify, roadway_width
+from irc_classify import classify
 from shapely.strtree import STRtree
 
 DEFAULT_ALIGNMENT = "input/DFCC_master_all_sections_Lines.geojson"
@@ -343,16 +345,15 @@ def flag_nearby_crossings(cand: gpd.GeoDataFrame, flag_m: float) -> gpd.GeoDataF
     return cand
 
 
-def compute_width_span(cand: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    def width_span(row):
-        w = roadway_width(row["irc_class"])
-        if w is None:
-            return pd.Series({"design_width_m": None, "span_m": None, "width_source": "needs field/imagery survey"})
-        span = w / math.sin(math.radians(max(row["angle_deg"], 1e-3)))
-        return pd.Series({"design_width_m": w, "span_m": round(span, 2), "width_source": f"IRC {row['irc_class']}"})
-
-    ws = cand.apply(width_span, axis=1)
-    return pd.concat([cand, ws], axis=1)
+def init_width_columns(cand: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """design_width_m/span_m come only from the SAM3 measurement in
+    measure_width_sam3.py - this just marks every row as pending that
+    measurement. irc_class still feeds the SUSPECT/review check there,
+    but no longer sets or floors the design value itself."""
+    cand["design_width_m"] = None
+    cand["span_m"] = None
+    cand["width_source"] = "needs field/imagery survey"
+    return cand
 
 
 # ---------------------------------------------------------------- CLI
@@ -414,7 +415,7 @@ def main() -> None:
 
     G = build_barrier_graph(roads, align, align_barrier)
     cand = apply_connectivity_rule(cand, G, corridor, args.min_component_len_m, args.junction_flag_m, args.skew_flag_deg)
-    cand = compute_width_span(cand)
+    cand = init_width_columns(cand)
 
     cand = cand.sort_values(["align_id", "chainage_m"]).reset_index(drop=True)
     cand.insert(0, "crossing_id", [f"{args.id_prefix}-{i + 1:03d}" for i in range(len(cand))])
@@ -430,8 +431,7 @@ def main() -> None:
     print(cand_wgs["decision"].value_counts().to_string())
     print("\nBy IRC class:")
     print(cand_wgs.groupby(["irc_class", "decision"]).size().to_string())
-    needs_survey = cand_wgs[(cand_wgs["decision"] != "no_crossing") & (cand_wgs["design_width_m"].isna())]
-    print(f"\n{len(needs_survey)} crossing(s) need a field/imagery width survey (track/footpath class, no IRC minimum).")
+    print("\nAll design widths/spans are pending SAM3 measurement - run src/measure_width_sam3.py next.")
     nearby = cand_wgs[cand_wgs["nearby_crossing_id"].notna()]
     if len(nearby):
         print(f"\n{len(nearby) // 2} pair(s) flagged R8 (another crossing within {args.nearby_crossing_flag_m:.0f} m - "

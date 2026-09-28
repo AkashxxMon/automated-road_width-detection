@@ -10,10 +10,12 @@ point. The OSM road tangent (from the roads file crossing_identify.py
 already wrote) is only used to orient the 5 perpendicular transects, not
 for prompting. No per-image human interaction.
 
-A measurement flagged SUSPECT (implausible for its road class, or the
-transects disagree too much - usually tree canopy or a divided
-carriageway) is never allowed to override the IRC design-width floor -
-see resolve_width() - so one bad mask can't silently inflate a span.
+Design width and span come entirely from this measurement - there is no
+IRC minimum floor. The IRC class (from crossing_identify.py) is used only
+to flag a measurement as SUSPECT when it's implausible for that class of
+road (or the 5 transects disagree too much) - see resolve_width() - so a
+reviewer knows to check it, without the pipeline silently substituting or
+capping the number.
 
 Needs local weights in ./model/sam3 - see src/download_sam3.py.
 facebook/sam3 is gated with manual approval from Meta; weights are kept
@@ -35,7 +37,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from geo_utils import get_utm_epsg, write_csv, write_geojson
 from imagery import fetch_crop
@@ -44,10 +46,10 @@ from width_core import measure_transects, road_tangent_bearing, save_qa_image
 
 DEFAULT_CROSSINGS = "output/gujarat_crossings.geojson"
 DEFAULT_ROADS = "shared/roads_gujarat.geojson"
-DEFAULT_OUTPUT = "output/gujarat_crossings_final.geojson"
-DEFAULT_CSV_OUTPUT = "output/gujarat_crossings_final.csv"
-DEFAULT_SURVEY_CSV = "output/gujarat_width_survey.csv"
-DEFAULT_IMAGES_DIR = "output/width_crops_sam3"
+DEFAULT_OUTPUT = "output/gujarat_crossings_final_gl.geojson"
+DEFAULT_CSV_OUTPUT = "output/gujarat_crossings_final_gl.csv"
+DEFAULT_SURVEY_CSV = "output/gujarat_width_survey_gl.csv"
+DEFAULT_IMAGES_DIR = "output/width_crops_sam3_gl"
 DEFAULT_MODEL_DIR = "model/sam3"
 
 DETECT_THRESHOLD = 0.4  # SAM3's own example uses 0.5; slightly looser since a small crop has few distractors
@@ -66,9 +68,28 @@ def load_model(model_dir: Path, device: str):
     return model, processor
 
 
-def pick_instance(results: dict, center_xy: tuple[float, float], crop_area: int):
+MERGE_NEARBY_M = 18.0  # bridge a gap up to this wide between separate SAM3 instances - covers a
+                       # typical divided-highway median so both carriageways measure as one road
+
+
+def _dilate(mask: np.ndarray, kernel_px: int) -> np.ndarray:
+    """Morphological dilation via PIL's MaxFilter (no scipy dependency)."""
+    if kernel_px < 3:
+        return mask
+    if kernel_px % 2 == 0:
+        kernel_px += 1
+    img = Image.fromarray((mask.astype(np.uint8) * 255))
+    dilated = img.filter(ImageFilter.MaxFilter(kernel_px))
+    return np.asarray(dilated) > 0
+
+
+def pick_instance(results: dict, center_xy: tuple[float, float], crop_area: int, mpp: float):
     """Among SAM3's detected instances, pick the one at the known crossing
-    point - by mask containment first, else by nearest box centre."""
+    point - by mask containment first, else by nearest box centre. Then
+    union in any OTHER instance whose mask is within MERGE_NEARBY_M of the
+    picked one - a divided highway is often detected as 2+ separate
+    instances (one per carriageway, split by the median), and using only
+    one badly under-measures the true design width."""
     masks = results.get("masks")
     boxes = results.get("boxes")
     scores = results.get("scores")
@@ -80,26 +101,34 @@ def pick_instance(results: dict, center_xy: tuple[float, float], crop_area: int)
         m = m.detach().cpu().numpy() if hasattr(m, "detach") else np.asarray(m)
         return m.astype(bool)
 
+    all_masks = [as_bool(masks[i]) for i in range(len(masks))]
+
     containing = []
-    for i in range(len(masks)):
-        m = as_bool(masks[i])
+    for i, m in enumerate(all_masks):
         if m.shape[0] > cy >= 0 and m.shape[1] > cx >= 0 and m[int(cy), int(cx)]:
             if m.sum() / crop_area <= 0.6:
                 containing.append((i, float(scores[i]) if scores is not None else 0.0))
+
     if containing:
         best_i = max(containing, key=lambda t: t[1])[0]
-        return as_bool(masks[best_i])
-
-    if boxes is None:
+    elif boxes is not None:
+        best_i, best_d = None, float("inf")
+        for i in range(len(boxes)):
+            x0, y0, x1, y1 = [float(v) for v in boxes[i]]
+            bcx, bcy = (x0 + x1) / 2, (y0 + y1) / 2
+            d = (bcx - cx) ** 2 + (bcy - cy) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+    else:
         return None
-    best_i, best_d = None, float("inf")
-    for i in range(len(boxes)):
-        x0, y0, x1, y1 = [float(v) for v in boxes[i]]
-        bcx, bcy = (x0 + x1) / 2, (y0 + y1) / 2
-        d = (bcx - cx) ** 2 + (bcy - cy) ** 2
-        if d < best_d:
-            best_d, best_i = d, i
-    return as_bool(masks[best_i]) if best_i is not None else None
+
+    combined = all_masks[best_i].copy()
+    kernel_px = int(round(MERGE_NEARBY_M / mpp))
+    dilated = _dilate(combined, kernel_px)
+    for i, m in enumerate(all_masks):
+        if i != best_i and (m & dilated).any() and m.sum() / crop_area <= 0.6:
+            combined |= m
+    return combined
 
 
 def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, args) -> pd.DataFrame:
@@ -141,7 +170,7 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
             target_sizes=inputs.get("original_sizes").tolist(),
         )[0]
 
-        mask = pick_instance(results, center_px, h * w)
+        mask = pick_instance(results, center_px, h * w, mpp)
         widths = measure_transects(mask, mpp, bearing, center_px) if mask is not None else []
         save_qa_image(Path(args.images_dir) / f"{cid}.jpg", rgb, mask, bearing, mpp, center_px, widths)
 
@@ -172,20 +201,15 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
 
 
 def resolve_width(row):
-    """design_width_m = max(measured, IRC minimum), unless the measurement is
-    SUSPECT, in which case it falls back to the IRC floor (or stays
-    'needs survey') rather than being trusted."""
+    """design_width_m/span_m come from the SAM3 measurement alone - no IRC
+    floor, no substitution. A SUSPECT measurement is still used, just
+    labelled for review rather than trusted silently; there's no other
+    number to fall back to."""
     if pd.isna(row["measured_width_m"]):
-        return row["design_width_m"], row["width_source"], row["span_m"]
-    irc_width = row["design_width_m"] if str(row["width_source"]).startswith("IRC") else 0.0
-    if "SUSPECT" in str(row["notes"]):
-        if irc_width > 0:
-            return irc_width, "IRC (measurement flagged SUSPECT, verify manually)", row["span_m"]
-        return row["design_width_m"], "needs field/imagery survey (auto measurement flagged SUSPECT)", row["span_m"]
-    w = max(row["measured_width_m"], irc_width)
-    source = "measured" if row["measured_width_m"] >= irc_width else "IRC (exceeds measured)"
-    span = round(w / math.sin(math.radians(max(row["angle_deg"], 1e-3))), 2)
-    return w, source, span
+        return None, "needs field/imagery survey", None
+    span = round(row["measured_width_m"] / math.sin(math.radians(max(row["angle_deg"], 1e-3))), 2)
+    source = "measured (SUSPECT - verify manually)" if "SUSPECT" in str(row["notes"]) else "measured"
+    return row["measured_width_m"], source, span
 
 
 def parse_args():
