@@ -1,6 +1,8 @@
-# DFC Alignment Crossing Finder — Gujarat
+# Railway Alignment Crossing Finder
 
-Finds every point where a road crosses the proposed DFC rail alignment within Gujarat, decides which ones need a grade-separated structure (no level crossings are permitted on new lines per the Railway Board's Aug 2023 directive), measures the road's width from satellite imagery, and computes the span the structure needs along the track.
+Finds every point where a road crosses a proposed railway alignment, decides which ones need a grade-separated structure (no level crossings are permitted on new lines per the Railway Board's Aug 2023 directive), measures the road's width from satellite imagery, and computes the span the structure needs along the track.
+
+**This works for any railway alignment, anywhere** — not tied to any specific line or state. Give it a centreline file and (optionally) a boundary polygon for the state/region you care about, and it does the rest. This checkout happens to come with one example alignment and one example state boundary already sitting in `input/` so you can try it immediately with no arguments, but nothing about the tool itself is specific to them.
 
 Two commands do the whole job:
 
@@ -38,26 +40,27 @@ python -m venv .venv
 
 ## 2. Running it
 
-```powershell
-.venv\Scripts\python.exe src\crossing_identify.py
-.venv\Scripts\python.exe src\measure_width_sam3.py
-.venv\Scripts\python.exe src\make_review_map.py
-```
-
-That's the whole pipeline. Open `output/gujarat_review_map.html` in a browser afterward to see the results on a map.
-
-Both commands take arguments for everything (input files, output paths, every rule threshold) — run either with `--help` to see the full list. With no arguments, they reproduce this project's Gujarat setup exactly, reading from `input/DFCC_master_all_sections_Lines.geojson` and `input/boundaries/gujarat.geojson`.
-
-To point the pipeline at a different alignment/state entirely:
+**For your own alignment and region:**
 
 ```powershell
 .venv\Scripts\python.exe src\crossing_identify.py `
     --alignment my_line.geojson --boundary my_state.geojson --corridor-km 1.5 -o my_crossings.geojson
 .venv\Scripts\python.exe src\measure_width_sam3.py `
     --crossings my_crossings.geojson --roads shared\roads_my_line.geojson -o my_crossings_final.geojson
+.venv\Scripts\python.exe src\make_review_map.py
 ```
 
-Pass `--boundary ""` to run against the whole alignment input, unclipped.
+`--alignment` is any centreline file geopandas can read; `--boundary` is any polygon to clip it to (a state, a district, a custom AOI). Pass `--boundary ""` to run against the whole alignment input, unclipped. Both commands take arguments for every input file, output path, and rule threshold — run either with `--help` for the full list.
+
+**Quick try with no arguments** — both commands fall back to the example alignment/boundary already bundled under `input/` in this checkout, so you can run the same three commands above with no flags at all and get a working result immediately:
+
+```powershell
+.venv\Scripts\python.exe src\crossing_identify.py
+.venv\Scripts\python.exe src\measure_width_sam3.py
+.venv\Scripts\python.exe src\make_review_map.py
+```
+
+Open the resulting HTML file in a browser afterward to see the results on a map.
 
 ### Optional extras
 
@@ -73,7 +76,7 @@ Pass `--boundary ""` to run against the whole alignment input, unclipped.
 
 ### Step 1 — `crossing_identify.py`: find the crossings
 
-1. **Clip the alignment.** Reads the rail centreline and cuts it down to just the part inside the given boundary (Gujarat, by default).
+1. **Clip the alignment.** Reads the rail centreline and cuts it down to just the part inside the given boundary polygon.
 2. **Fetch the road network.** Downloads every road from OpenStreetMap within a corridor around that alignment (2km either side, by default).
 3. **Find every crossing.** Wherever a road physically intersects the alignment, record the point, how far along the alignment it is (`chainage_m`), and the angle between the road and the track (`angle_deg`).
 4. **Classify the road.** Each road gets sorted into an IRC category (`NH`/`SH`/`MDR`/`ODR`/`VR`/`TRK`/`PTH`/`EXP`) based on its OpenStreetMap tags. This class **no longer sets the design width** — it's used later only to flag a measurement as suspicious if it doesn't look right for that kind of road.
@@ -87,7 +90,7 @@ Pass `--boundary ""` to run against the whole alignment input, unclipped.
    - **R7** — flagged if the crossing angle is sharp (below 45°) — the structure will need to be much longer than the road is wide.
    - **R8** — flagged if another crossing sits within 40m on the same alignment segment — usually the same road mapped twice, or a genuine parallel track; needs a human decision on whether it's one structure or two.
 
-Output: `output/gujarat_crossings.geojson` — one row per crossing, with a decision but no width yet.
+Output: one GeoJSON file, one row per crossing, with a decision but no width yet.
 
 ### Step 2 — `measure_width_sam3.py`: measure the road and finish the register
 
@@ -99,7 +102,7 @@ Output: `output/gujarat_crossings.geojson` — one row per crossing, with a deci
    - `design_width_m` — the road's measured width. Always comes from SAM3; there's no other source.
    - `span_m` — the length the structure needs **along the railway track**: `design_width_m ÷ sin(crossing angle)`. At a square (90°) crossing this equals the road width; at a shallow angle it can be much longer.
 
-Output: `output/gujarat_crossings_final_gl.geojson` (and `.csv`) — the finished register, plus a QA image per crossing in `output/width_crops_sam3_gl/` so every automated measurement can be checked visually.
+Output: the finished register (GeoJSON + CSV), plus a QA image per crossing so every automated measurement can be checked visually.
 
 ### The review map
 
