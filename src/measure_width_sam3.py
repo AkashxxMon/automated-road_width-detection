@@ -38,18 +38,22 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image, ImageFilter
+from shapely.geometry import LineString, Point
+from shapely.ops import substring
 
 from geo_utils import get_utm_epsg, write_csv, write_geojson
 from imagery import fetch_crop
 from irc_classify import plausible_range
-from width_core import measure_transects, road_tangent_bearing, save_qa_image
+from width_core import measure_transects_detailed, road_tangent_bearing, save_qa_image
 
 DEFAULT_CROSSINGS = "output/gujarat_crossings.geojson"
 DEFAULT_ROADS = "shared/roads_gujarat.geojson"
+DEFAULT_ALIGNMENT = "shared/alignment_gujarat.geojson"
 DEFAULT_OUTPUT = "output/gujarat_crossings_final_gl.geojson"
 DEFAULT_CSV_OUTPUT = "output/gujarat_crossings_final_gl.csv"
 DEFAULT_SURVEY_CSV = "output/gujarat_width_survey_gl.csv"
-DEFAULT_IMAGES_DIR = "output/width_crops_sam3_gl"
+DEFAULT_IMAGES_DIR = "output/width_crops_sam3_gl_1"
+DEFAULT_WIDTH_GEOMETRY_OUTPUT = "output/gujarat_width_geometry_gl.geojson"
 DEFAULT_MODEL_DIR = "model/sam3"
 
 DETECT_THRESHOLD = 0.4  # SAM3's own example uses 0.5; slightly looser since a small crop has few distractors
@@ -171,7 +175,8 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
         )[0]
 
         mask = pick_instance(results, center_px, h * w, mpp)
-        widths = measure_transects(mask, mpp, bearing, center_px) if mask is not None else []
+        detailed = measure_transects_detailed(mask, mpp, bearing, center_px) if mask is not None else []
+        widths = [d["width_m"] for d in detailed]
         save_qa_image(Path(args.images_dir) / f"{cid}.jpg", rgb, mask, bearing, mpp, center_px, widths)
 
         if widths:
@@ -184,10 +189,24 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
                 conf = "low"
             flag = " SUSPECT" if suspect else ""
             print(f"  {cid}: {med:.1f} m (n={len(widths)}, iqr={iqr:.2f}, conf={conf}, zoom={zoom}){flag}")
+
+            # the transect whose width is closest to the reported median is the one whose
+            # edge pixels become the width-line geometry - not necessarily the geographically
+            # centre (offset=0) transect, whose own width can disagree with the reported median
+            center_transect = min(detailed, key=lambda d: abs(d["width_m"] - med))
+            p1x, p1y = center_transect["p1_px"]
+            p2x, p2y = center_transect["p2_px"]
+            width_p1_x = pt_utm.x + (p1x - center_px[0]) * mpp
+            width_p1_y = pt_utm.y - (p1y - center_px[1]) * mpp
+            width_p2_x = pt_utm.x + (p2x - center_px[0]) * mpp
+            width_p2_y = pt_utm.y - (p2y - center_px[1]) * mpp
+
             rows.append({"crossing_id": cid, "measured_width_m": round(med, 2),
                          "measured_by": f"SAM3({args.text})+EsriWorldImagery-auto(z{zoom})",
                          "notes": f"n={len(widths)} transects, IQR={iqr:.2f} m, confidence={conf}"
-                                  + (" - SUSPECT: mask likely over-extended (tree cover/shadow), check QA crop" if suspect else "")})
+                                  + (" - SUSPECT: mask likely over-extended (tree cover/shadow), check QA crop" if suspect else ""),
+                         "width_p1_x": width_p1_x, "width_p1_y": width_p1_y,
+                         "width_p2_x": width_p2_x, "width_p2_y": width_p2_y})
         elif mask is None:
             print(f"  {cid}: no '{args.text}' instance detected at the crossing point")
             rows.append({"crossing_id": cid, "measured_width_m": None, "measured_by": None,
@@ -212,10 +231,63 @@ def resolve_width(row):
     return row["measured_width_m"], source, span
 
 
+def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, args) -> None:
+    """One combined layer, geometry drawn to scale, two kinds of line per
+    crossing:
+      - "width": the actual SAM3 measurement, the two road-edge pixels the
+        transect walk found - only present where a live SAM3 measurement ran
+        (not for a --measured-csv merge, which has no pixel geometry).
+      - "span": the length of structure needed *along the railway track*
+        (design_width_m / sin(angle) - see resolve_width()), drawn as the
+        real alignment geometry between chainage-span/2 and chainage+span/2,
+        not just a straight tangent segment, so it stays accurate on curves.
+    """
+    props = ["crossing_id", "align_name", "chainage_m", "irc_class", "angle_deg",
+              "measured_width_m", "design_width_m", "span_m", "width_source", "decision"]
+    props = [c for c in props if c in cross.columns]
+
+    width_rows = []
+    has_width_geom = cross[["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]].notna().all(axis=1) \
+        if "width_p1_x" in cross.columns else pd.Series(False, index=cross.index)
+    for _, r in cross[has_width_geom].iterrows():
+        geom = LineString([(r["width_p1_x"], r["width_p1_y"]), (r["width_p2_x"], r["width_p2_y"])])
+        width_rows.append({**{c: r[c] for c in props}, "kind": "width", "geometry": geom})
+
+    span_rows = []
+    if Path(args.alignment).exists() and "align_id" in cross.columns:
+        align = gpd.read_file(args.alignment).to_crs(epsg)
+        align_by_id = {row["align_id"]: row.geometry for _, row in align.iterrows()}
+        has_span = cross["span_m"].notna() & cross["chainage_m"].notna() & cross["align_id"].notna()
+        for _, r in cross[has_span].iterrows():
+            line = align_by_id.get(r["align_id"])
+            if line is None:
+                continue
+            half = r["span_m"] / 2.0
+            start = max(r["chainage_m"] - half, 0.0)
+            end = min(r["chainage_m"] + half, line.length)
+            if end <= start:
+                continue
+            geom = substring(line, start, end)
+            span_rows.append({**{c: r[c] for c in props}, "kind": "span", "geometry": geom})
+    else:
+        print(f"\n  [warn] {args.alignment} not found - skipping span-line geometry (width lines still written if available)")
+
+    if not width_rows and not span_rows:
+        print("\nno width/span geometry available (likely a --measured-csv run with no matching alignment) - "
+              "skipping width-geometry output")
+        return
+
+    combined = gpd.GeoDataFrame(width_rows + span_rows, geometry="geometry", crs=epsg).to_crs(4326)
+    write_geojson(combined, Path(args.width_geometry_output))
+    print(f"wrote {args.width_geometry_output} ({len(width_rows)} width line(s), {len(span_rows)} span line(s))")
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--crossings", default=DEFAULT_CROSSINGS, help="Input crossings GeoJSON (from crossing_identify.py)")
     ap.add_argument("--roads", default=DEFAULT_ROADS, help="Roads GeoJSON (from crossing_identify.py) - used for the transect bearing")
+    ap.add_argument("--alignment", default=DEFAULT_ALIGNMENT,
+                     help="Clipped alignment GeoJSON (from crossing_identify.py) - used to draw the span-line geometry")
     ap.add_argument("--epsg", type=int, default=None, help="Metric CRS for measurement. Default: auto-detect UTM zone")
     ap.add_argument("--model-dir", default=DEFAULT_MODEL_DIR, help="Local SAM3 weights directory")
     ap.add_argument("--text", default="road", help="Concept prompt passed to SAM3")
@@ -229,6 +301,8 @@ def parse_args():
     ap.add_argument("--csv-output", default=DEFAULT_CSV_OUTPUT, help="Output final crossings CSV")
     ap.add_argument("--survey-csv", default=DEFAULT_SURVEY_CSV, help="Where to save the raw SAM3 measurement data")
     ap.add_argument("--images-dir", default=DEFAULT_IMAGES_DIR, help="Directory for the per-crossing QA images")
+    ap.add_argument("--width-geometry-output", default=DEFAULT_WIDTH_GEOMETRY_OUTPUT,
+                     help="Output GeoJSON: one layer with both the measured width lines and the along-track span lines, drawn to scale")
     return ap.parse_args()
 
 
@@ -255,23 +329,26 @@ def main() -> None:
         print(f"QA crops in {args.images_dir}/")
 
     survey = survey[survey["measured_width_m"].notna()]
-    for col in ("measured_by", "notes"):
+    for col in ("measured_by", "notes", "width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"):
         if col not in survey.columns:
             survey[col] = None
-    survey = survey[["crossing_id", "measured_width_m", "measured_by", "notes"]]
+    edge_cols = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]
+    survey = survey[["crossing_id", "measured_width_m", "measured_by", "notes"] + edge_cols]
     print(f"\n{len(survey)} measured row(s) to merge")
 
-    cross = cross.drop(columns=["measured_width_m", "measured_by", "notes"], errors="ignore")
+    cross = cross.drop(columns=["measured_width_m", "measured_by", "notes"] + edge_cols, errors="ignore")
     cross = cross.merge(survey, on="crossing_id", how="left")
     cross[["design_width_m", "width_source", "span_m"]] = cross.apply(resolve_width, axis=1, result_type="expand")
 
-    write_geojson(cross, Path(args.output))
+    write_geojson(cross.drop(columns=edge_cols), Path(args.output))
     write_csv(cross.drop(columns="geometry"), Path(args.csv_output))
     print(f"\nwrote {args.output}")
     print(f"wrote {args.csv_output}")
     print(cross["width_source"].value_counts().to_string())
     still_missing = cross[cross["width_source"].str.startswith("needs field/imagery survey")]
     print(f"\n{len(still_missing)} crossing(s) still have no usable width at all - keep surveying.")
+
+    write_width_geometry(cross, epsg, args)
 
 
 if __name__ == "__main__":

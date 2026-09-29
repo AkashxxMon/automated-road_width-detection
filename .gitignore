@@ -8,5 +8,4 @@ model/
 output/
 shared/*.geojson
 validation/*geojson
-input/*.geojson
-input/*.kmz
+input/

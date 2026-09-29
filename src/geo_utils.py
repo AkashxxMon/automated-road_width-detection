@@ -42,6 +42,16 @@ def get_utm_epsg(lon: float, lat: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
+def offset_lonlat(lon: float, lat: float, east_m: float, north_m: float) -> tuple[float, float]:
+    """(lon, lat) shifted by (east_m, north_m) metres, via a local flat-earth
+    approximation - fine at the ~100-200m scale these imagery crops cover,
+    consistent with the local mpp assumption width_core.py's transects
+    already make."""
+    m_per_deg_lat = 111_320.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat))
+    return lon + east_m / m_per_deg_lon, lat + north_m / m_per_deg_lat
+
+
 def flatten_geom(geom):
     """Yield LineString parts out of a LineString/MultiLineString/GeometryCollection."""
     if geom is None or geom.is_empty:

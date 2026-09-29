@@ -64,8 +64,13 @@ def _nearest_mask_pixel(mask: np.ndarray, cx: float, cy: float, max_radius_px: i
     return int(xs[idx]), int(ys[idx])
 
 
-def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: tuple[float, float],
-                       max_snap_m: float = MAX_SNAP_M) -> list[float]:
+def measure_transects_detailed(mask: np.ndarray, mpp: float, bearing: float, center_px: tuple[float, float],
+                                max_snap_m: float = MAX_SNAP_M) -> list[dict]:
+    """One entry per successful transect (offsets that fell off the mask/crop
+    are omitted): {"offset_m", "width_m", "p1_px", "p2_px"} - p1_px/p2_px are
+    the two road-edge pixels the width was measured between, so a caller can
+    turn the measurement into real geometry (a line, or the two edge points)
+    instead of just a number."""
     h, w = mask.shape
     brg = math.radians(bearing)
     perp = brg + math.pi / 2
@@ -73,7 +78,7 @@ def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: t
     dx_along, dy_along = math.sin(brg), math.cos(brg)
     max_radius_px = max(1, int(round(max_snap_m / mpp)))
 
-    widths = []
+    results = []
     for off in TRANSECT_OFFSETS_M:
         cx = center_px[0] + (off * dx_along) / mpp
         cy = center_px[1] - (off * dy_along) / mpp
@@ -101,8 +106,21 @@ def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: t
             neg = step
         width_m = (pos + neg + 1) * mpp
         if width_m <= MAX_PLAUSIBLE_WIDTH_M:
-            widths.append(width_m)
-    return widths
+            # edge points sit at the outer half-pixel boundary of the run, not
+            # the centre of the outermost True pixel - pos+neg would only span
+            # pos+neg pixels (undercounting by 1 vs width_m, which correctly
+            # counts pos+neg+1 pixels inclusive of the centre pixel itself)
+            p1 = (cx - (neg + 0.5) * dx_perp, cy + (neg + 0.5) * dy_perp)
+            p2 = (cx + (pos + 0.5) * dx_perp, cy - (pos + 0.5) * dy_perp)
+            results.append({"offset_m": off, "width_m": width_m, "p1_px": p1, "p2_px": p2})
+    return results
+
+
+def measure_transects(mask: np.ndarray, mpp: float, bearing: float, center_px: tuple[float, float],
+                       max_snap_m: float = MAX_SNAP_M) -> list[float]:
+    """Back-compat wrapper - just the widths, for callers that don't need
+    the edge geometry (measure_width.py)."""
+    return [r["width_m"] for r in measure_transects_detailed(mask, mpp, bearing, center_px, max_snap_m)]
 
 
 def save_qa_image(path: Path, rgb: np.ndarray, mask: np.ndarray | None, bearing: float,

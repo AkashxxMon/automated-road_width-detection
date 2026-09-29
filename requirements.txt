@@ -5,7 +5,6 @@ fiona
 pyogrio
 pyarrow
 networkx
-osmnx
 folium
 requests
 pillow

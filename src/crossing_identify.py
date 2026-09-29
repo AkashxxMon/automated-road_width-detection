@@ -1,11 +1,11 @@
-"""One command: clip a rail/road alignment to a boundary (optional), fetch
-the OpenStreetMap road network for a corridor around it, and find every
-point where a road crosses the alignment - chainage, crossing angle, IRC
-road class, and the connectivity/dead-end rule (R1-R4). The IRC class
-assigned here is used later only to flag an implausible measurement for
-review - design width/span come entirely from the SAM3 measurement
-(stage 6, a separate step - see measure_width_sam3.py), not from an IRC
-minimum.
+"""One command: clip a rail/road alignment to a boundary (optional), load
+the road network for a corridor around it from local NIC road data (no
+live API, no network dependency), and find every point where a road
+crosses the alignment - chainage, crossing angle, IRC road class, and the
+connectivity/dead-end rule (R1-R4). The IRC class assigned here is used
+later only to flag an implausible measurement for review - design
+width/span come entirely from the SAM3 measurement (stage 6, a separate
+step - see measure_width_sam3.py), not from an IRC minimum.
 
 Nothing about the project area is hardcoded: the alignment file, the
 clip boundary, the corridor width, the output CRS and every rule
@@ -15,19 +15,21 @@ alignment/boundary pair to run it anywhere else.
 
 Usage:
     python src/crossing_identify.py
-    python src/crossing_identify.py --alignment my_line.geojson --boundary my_state.geojson --corridor-km 1.5
+    python src/crossing_identify.py --alignment my_line.geojson --state Maharashtra --corridor-km 1.5
+    python src/crossing_identify.py --alignment my_line.geojson --boundary my_state.geojson
     python src/crossing_identify.py --alignment my_line.geojson --boundary ""   # unclipped: use the whole input
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import math
+import re
 from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
-import osmnx as ox
 import pandas as pd
 from shapely.geometry import Point
 from shapely.ops import split, unary_union
@@ -38,20 +40,60 @@ from shapely.strtree import STRtree
 
 DEFAULT_ALIGNMENT = "input/DFCC_master_all_sections_Lines.geojson"
 DEFAULT_BOUNDARY = "input/boundaries/gujarat.geojson"
+DEFAULT_STATES_FILE = "input/boundaries/india_states.geojson"
+DEFAULT_STATE_NAME_FIELD = "NAME_1"
+DEFAULT_ROADS_GLOB = "input/Roads/NIC_Roads.*.parquet"
 DEFAULT_OUTPUT = "output/gujarat_crossings.geojson"
 DEFAULT_SUMMARY_CSV = "output/gujarat_crossings_summary.csv"
 DEFAULT_ALIGNMENT_OUTPUT = "shared/alignment_gujarat.geojson"
 DEFAULT_ROADS_OUTPUT = "shared/roads_gujarat.geojson"
 DEFAULT_CORRIDOR_OUTPUT = "shared/corridor_2km.geojson"
 
-OSM_HIGHWAY_VALUES = [
+# accepted here, and by irc_classify._HIGHWAY_TO_IRC - a road classified into
+# one of these OSM-vocabulary buckets (either passed through directly from a
+# NIC column that already used it, or inferred from NIC's free-text class
+# names below) is what classify() keys its IRC-class guess off of
+_OSM_HIGHWAY_VALUES = {
     "motorway", "trunk", "primary", "secondary", "tertiary",
     "unclassified", "residential", "track", "path", "footway",
     "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
-]
+}
 
 
 # ---------------------------------------------------------------- stage 1: alignment
+
+def resolve_boundary(args):
+    """The clip boundary, from one of three sources (at most one may be
+    given): --state (looked up by name in --states-file), --boundary (a
+    polygon file directly), or neither passed at all (falls back to this
+    project's own default boundary file). Pass --boundary "" explicitly to
+    get no clip at all (use the whole alignment input)."""
+    if args.state is not None and args.boundary is not None:
+        raise SystemExit("Pass --state or --boundary, not both.")
+
+    if args.state is not None:
+        states = gpd.read_file(args.states_file)
+        if args.state_name_field not in states.columns:
+            raise SystemExit(
+                f"{args.states_file} has no '{args.state_name_field}' property - "
+                f"available properties: {list(states.columns)}"
+            )
+        match = states[states[args.state_name_field].str.strip().str.casefold() == args.state.strip().casefold()]
+        if match.empty:
+            available = sorted(states[args.state_name_field].dropna().unique())
+            raise SystemExit(f"No state named {args.state!r} found in {args.states_file}. Available: {available}")
+        print(f"using state boundary for {args.state!r} from {args.states_file} "
+              f"({len(match)} feature(s) matched)")
+        return match.to_crs(4326).geometry.union_all()
+
+    if args.boundary is not None:
+        if args.boundary == "":
+            return None  # explicitly requested: no clip
+        return gpd.read_file(args.boundary).to_crs(4326).geometry.union_all()
+
+    # neither --state nor --boundary given at all - this project's own default
+    return gpd.read_file(DEFAULT_BOUNDARY).to_crs(4326).geometry.union_all()
+
 
 def prepare_alignment(args) -> gpd.GeoDataFrame:
     gdf = gpd.read_file(args.alignment)
@@ -70,13 +112,11 @@ def prepare_alignment(args) -> gpd.GeoDataFrame:
 
     id_field = args.id_field if args.id_field in gdf.columns else None
 
-    if args.boundary:
-        boundary = gpd.read_file(args.boundary).to_crs(4326)
-        boundary_geom = boundary.geometry.union_all()
-        print(f"clipping {len(gdf)} alignment feature(s) to {args.boundary}")
+    boundary_geom = resolve_boundary(args)
+    if boundary_geom is not None:
+        print(f"clipping {len(gdf)} alignment feature(s) to the given boundary")
     else:
-        boundary_geom = None
-        print(f"no --boundary given - using all {len(gdf)} alignment feature(s) unclipped")
+        print(f"no --state/--boundary given - using all {len(gdf)} alignment feature(s) unclipped")
 
     rows = []
     for i, row in gdf.iterrows():
@@ -118,31 +158,118 @@ def prepare_alignment(args) -> gpd.GeoDataFrame:
 
 
 # ---------------------------------------------------------------- stage 2: roads
+#
+# NIC's road files are a nationwide merge of many different states' own GIS
+# exports, so the columns that carry road class/route-number/name are not
+# consistent from row to row - one state's data might put "National Highway"
+# in `Class`, another puts the literal short code "NH" in `road_type_1`, a
+# third already used plain OSM highway-tag vocabulary ("primary", "trunk", ...)
+# in `type_2`. The three _nic_*() helpers below coalesce across every variant
+# column actually observed in this dataset (see the NIC_REF/CLASS/NAME column
+# lists), in priority order, so downstream code (classify(), R5's ref-match,
+# etc.) can keep treating `highway`/`ref`/`name` the same way it did for OSM.
 
-def fetch_road_network(corridor_wgs84, args) -> gpd.GeoDataFrame:
-    print("Querying Overpass for the OSM road network in the corridor ...")
-    ox.settings.requests_timeout = 300
-    custom_filter = '["highway"~"^({})$"]'.format("|".join(OSM_HIGHWAY_VALUES))
-    G = ox.graph_from_polygon(
-        corridor_wgs84, custom_filter=custom_filter, retain_all=True, simplify=False, truncate_by_edge=True,
-    )
-    print(f"  graph: {G.number_of_nodes()} node(s), {G.number_of_edges()} edge(s) (directed)")
+_NIC_REF_COLS = ["NH_no", "road_code_3", "Road_code_1", "Road_Code", "road_type_1", "CLASS_2"]
+_NIC_CLASS_TEXT_COLS = ["Class", "class_1", "CLASS_2", "road_type_1"]
+_NIC_NAME_COLS = ["Name", "name_1", "road_name", "NAME_2"]
+_NIC_RAW_HIGHWAY_COLS = ["type_2"]  # already OSM-vocabulary in some source states' rows
+_NIC_REF_PATTERN = re.compile(r"\b(NH|SH|MDR|ODR)\b", re.IGNORECASE)
 
-    # graph_from_polygon returns a MultiDiGraph: every two-way street is two
-    # directed edges (u->v and v->u) with the same geometry. Collapse those
-    # back to one edge each, or every crossing gets counted twice.
-    G = ox.convert.to_undirected(G)
-    print(f"  graph: {G.number_of_nodes()} node(s), {G.number_of_edges()} edge(s) (undirected)")
 
-    edges = ox.graph_to_gdfs(G, nodes=False, edges=True).reset_index()
-    keep_cols = [c for c in ["u", "v", "key", "osmid", "highway", "ref", "name",
-                              "lanes", "width", "oneway", "geometry"] if c in edges.columns]
-    edges = edges[keep_cols]
-    for col in ["highway", "ref", "name", "lanes", "width"]:
-        if col in edges.columns:
-            edges[col] = edges[col].apply(lambda v: v[0] if isinstance(v, list) else v)
-    print(f"roads: {len(edges)} edge(s)")
-    return edges
+def _nic_ref(row: pd.Series) -> str | None:
+    """Several of the _NIC_REF_COLS candidates are actually generic
+    classification codes reused across thousands of unrelated roads (a plain
+    "42" or "village_road", not a route number) - only accept a value that
+    genuinely looks like a highway reference (contains NH/SH/MDR/ODR), or R5's
+    same-ref dual-carriageway merge could wrongly fuse two unrelated nearby
+    minor roads that happen to share the same generic code."""
+    for col in _NIC_REF_COLS:
+        v = row.get(col)
+        if isinstance(v, str) and v.strip() and _NIC_REF_PATTERN.search(v):
+            return v.strip()
+    return None
+
+
+def _nic_highway(row: pd.Series) -> str | None:
+    for col in _NIC_RAW_HIGHWAY_COLS:
+        v = row.get(col)
+        if isinstance(v, str):
+            v = v.strip().lower()
+            if v in _OSM_HIGHWAY_VALUES:
+                return v
+    text = None
+    for col in _NIC_CLASS_TEXT_COLS:
+        v = row.get(col)
+        if isinstance(v, str) and v.strip():
+            text = v.strip().lower()
+            break
+    if text is None:
+        return None
+    if "express" in text or "asian highway" in text:
+        return "motorway"
+    if "national" in text or text == "nh":
+        return "trunk"
+    if "state" in text or text == "sh":
+        return "primary"
+    if "district" in text or text in ("mdr", "odr"):
+        return "tertiary"
+    if "village" in text:
+        return "residential"
+    if "street" in text or "town road" in text:
+        return "residential"
+    if "other" in text:
+        return "track"
+    return None
+
+
+def _nic_name(row: pd.Series) -> str | None:
+    for col in _NIC_NAME_COLS:
+        v = row.get(col)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def load_road_network(corridor_wgs84, args) -> gpd.GeoDataFrame:
+    """Road network for the corridor, read straight from local NIC road
+    parquet file(s) - no live API, no network dependency at all. Only the
+    row groups whose bbox overlaps the corridor are actually read (GeoParquet
+    bbox pushdown), then the result is clipped precisely to the corridor
+    polygon before the per-row class/ref/name mapping runs."""
+    paths = sorted(glob.glob(args.roads_glob))
+    if not paths:
+        raise SystemExit(f"No files matched --roads-glob {args.roads_glob!r}")
+
+    minx, miny, maxx, maxy = corridor_wgs84.bounds
+    print(f"Loading NIC road data for the corridor from {len(paths)} file(s): "
+          f"{', '.join(Path(p).name for p in paths)}")
+
+    parts = []
+    for p in paths:
+        part = gpd.read_parquet(p, bbox=(minx, miny, maxx, maxy))
+        print(f"  {Path(p).name}: {len(part)} row(s) in bbox")
+        if len(part):
+            parts.append(part)
+
+    if not parts:
+        raise SystemExit("No NIC road data intersects this corridor's bounding box.")
+
+    roads = pd.concat(parts, ignore_index=True)
+    roads = gpd.GeoDataFrame(roads, geometry="geometry", crs=parts[0].crs).to_crs(4326)
+    roads = roads[roads.geometry.notna() & roads.intersects(corridor_wgs84)].reset_index(drop=True)
+    # NIC data mixes LineString and MultiLineString rows - split every
+    # MultiLineString into its own simple-LineString rows (duplicating the
+    # other columns), since build_barrier_graph/find_candidates below work
+    # on individual LineString coordinate sequences only.
+    roads = roads.explode(index_parts=False).reset_index(drop=True)
+    print(f"  {len(roads)} road(s) after precise corridor clip")
+
+    roads["highway"] = roads.apply(_nic_highway, axis=1)
+    roads["ref"] = roads.apply(_nic_ref, axis=1)
+    roads["name"] = roads.apply(_nic_name, axis=1)
+    roads = roads[["highway", "ref", "name", "geometry"]]
+    print(f"roads: {len(roads)} edge(s)")
+    return roads
 
 
 # ---------------------------------------------------------------- stage 4: crossings
@@ -210,8 +337,8 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
 
 
 def merge_dual_carriageways(cand: gpd.GeoDataFrame, tol_m: float) -> gpd.GeoDataFrame:
-    """R5: two OSM ways within tol_m on the same align segment that share a
-    ref are one physical crossing (divided highway) - keep one row."""
+    """R5: two road segments within tol_m on the same align segment that share
+    a ref are one physical crossing (divided highway) - keep one row."""
     cand = cand.sort_values(["align_id", "chainage_m"]).reset_index(drop=True)
     cand["dual_carriageway"] = False
     used = set()
@@ -321,7 +448,7 @@ def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, corridor,
 
 def flag_nearby_crossings(cand: gpd.GeoDataFrame, flag_m: float) -> gpd.GeoDataFrame:
     """R8: two crossings this close together are often the same physical road
-    mapped as two separate/parallel OSM ways (a duplicate trace, or a paved
+    mapped as two separate/parallel segments (a duplicate trace, or a paved
     road with a parallel unpaved service track) rather than genuinely two
     structures - not auto-merged (unlike R5's same-ref case), since it can
     also be a real, separate road; flagged for the designer to decide.
@@ -365,16 +492,24 @@ def parse_args():
                      help="Property to filter alignment features by, e.g. a mixed export with ticks/ROW/centreline. Pass '' to disable.")
     ap.add_argument("--feature-type-value", default="centerline", help="Value to keep when --feature-type-field is set")
     ap.add_argument("--id-field", default="section_id", help="Property used to name/group alignment segments, if present")
-    ap.add_argument("--boundary", default=DEFAULT_BOUNDARY,
-                     help="State/country/AOI boundary polygon to clip the alignment to. Pass '' to use the whole input, unclipped.")
-    ap.add_argument("--corridor-km", type=float, default=2.0, help="Corridor half-width (km) for the OSM fetch and the connectivity-rule window")
+    ap.add_argument("--boundary", default=None,
+                     help=f"State/country/AOI boundary polygon to clip the alignment to. Pass '' to use the whole "
+                          f"input, unclipped. Default if neither this nor --state is given: {DEFAULT_BOUNDARY}")
+    ap.add_argument("--state", default=None,
+                     help="Indian state name (e.g. 'Gujarat') to clip to, looked up in --states-file instead of "
+                          "needing your own boundary file. Cannot be combined with --boundary.")
+    ap.add_argument("--states-file", default=DEFAULT_STATES_FILE, help="All-India state boundaries file used by --state")
+    ap.add_argument("--state-name-field", default=DEFAULT_STATE_NAME_FIELD, help="Property in --states-file holding the state name")
+    ap.add_argument("--corridor-km", type=float, default=2.0, help="Corridor half-width (km) for the road-data crop and the connectivity-rule window")
+    ap.add_argument("--roads-glob", default=DEFAULT_ROADS_GLOB,
+                     help="Glob for local NIC road parquet file(s) to load and crop to the corridor")
     ap.add_argument("--min-segment-m", type=float, default=50.0, help="Drop alignment slivers shorter than this after clipping")
     ap.add_argument("--epsg", type=int, default=None, help="Metric CRS to work in. Default: auto-detect UTM zone from the data's centroid")
     ap.add_argument("--id-prefix", default="GJ", help="Prefix for generated crossing_id values, e.g. GJ-001")
     ap.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output crossings GeoJSON")
     ap.add_argument("--summary-csv", default=DEFAULT_SUMMARY_CSV, help="Output crossings summary CSV")
     ap.add_argument("--alignment-output", default=DEFAULT_ALIGNMENT_OUTPUT, help="Where to save the clipped alignment")
-    ap.add_argument("--roads-output", default=DEFAULT_ROADS_OUTPUT, help="Where to save the fetched OSM road network")
+    ap.add_argument("--roads-output", default=DEFAULT_ROADS_OUTPUT, help="Where to save the loaded road network")
     ap.add_argument("--corridor-output", default=DEFAULT_CORRIDOR_OUTPUT, help="Where to save the corridor polygon")
     ap.add_argument("--min-component-len-m", type=float, default=300.0, help="Min network length for a component without leaving the corridor to count as connected")
     ap.add_argument("--dual-merge-tol-m", type=float, default=30.0, help="R5: merge distance for same-ref dual-carriageway crossings")
@@ -397,7 +532,7 @@ def main() -> None:
     write_geojson(gpd.GeoDataFrame(geometry=corridor_wgs, crs=4326), Path(args.corridor_output))
     print(f"wrote {args.corridor_output}")
 
-    roads = fetch_road_network(corridor_wgs.iloc[0], args).to_crs(epsg)
+    roads = load_road_network(corridor_wgs.iloc[0], args).to_crs(epsg)
     write_geojson(roads.to_crs(4326), Path(args.roads_output))
     print(f"wrote {args.roads_output}")
 
