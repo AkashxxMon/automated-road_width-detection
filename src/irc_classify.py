@@ -1,10 +1,12 @@
 """Road hierarchy: OSM highway/ref tags -> IRC class.
 
 The IRC class no longer sets the design width (that comes from the SAM3
-measurement only, in measure_width_sam3.py) - it's kept purely to flag a
+measurement only, in measure_width_sam3.py) - it's used to flag a
 measurement as SUSPECT when it's implausible for that class of road (e.g.
 a "village road" mask that's actually 20m wide almost certainly bled into
-a field), so a reviewer knows to check it rather than trust it blindly.
+a field), so a reviewer knows to check it rather than trust it blindly,
+and to split major roads (which get a structure) from minor ones (which
+get re-routed) in structure_decide.py.
 """
 
 from __future__ import annotations
@@ -48,3 +50,11 @@ PLAUSIBLE_RANGE_M = {
 
 def plausible_range(irc_class: str) -> tuple[float, float]:
     return PLAUSIBLE_RANGE_M.get(irc_class, (2.0, 12.0))
+
+
+# road hierarchy for the structure call (structure_decide.py): a major road
+# gets a grade-separated structure, a minor one (village road, street, cart
+# track, path) is re-routed to the nearest structure instead. ODR is major
+# because NIC's "District Road" doesn't separate MDR from ODR - every
+# district road lands in the ODR bucket, and they're too important to reroute
+MAJOR_CLASSES = ("EXP", "NH", "SH", "MDR", "ODR")

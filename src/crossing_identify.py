@@ -2,7 +2,7 @@
 the road network for a corridor around it from local NIC road data (no
 live API, no network dependency), and find every point where a road
 crosses the alignment - chainage, crossing angle, IRC road class, and the
-connectivity/dead-end rule (R1-R4). The IRC class assigned here is used
+connectivity/dead-end rule (R1, R2, R4). The IRC class assigned here is used
 later only to flag an implausible measurement for review - design
 width/span come entirely from the SAM3 measurement (stage 6, a separate
 step - see measure_width_sam3.py), not from an IRC minimum.
@@ -33,8 +33,10 @@ import networkx as nx
 import pandas as pd
 from shapely.geometry import Point
 from shapely.ops import split, unary_union
+from shapely.prepared import prep
 
-from geo_utils import flatten_geom, get_utm_epsg, write_csv, write_geojson
+from geo_utils import (flatten_geom, get_utm_epsg, region_paths, region_prefix, region_slug, remember_region,
+                       write_csv, write_geojson)
 from irc_classify import classify
 from shapely.strtree import STRtree
 
@@ -43,11 +45,8 @@ DEFAULT_BOUNDARY = "input/boundaries/gujarat.geojson"
 DEFAULT_STATES_FILE = "input/boundaries/india_states.geojson"
 DEFAULT_STATE_NAME_FIELD = "NAME_1"
 DEFAULT_ROADS_GLOB = "input/Roads/NIC_Roads.*.parquet"
-DEFAULT_OUTPUT = "output/gujarat_crossings.geojson"
-DEFAULT_SUMMARY_CSV = "output/gujarat_crossings_summary.csv"
-DEFAULT_ALIGNMENT_OUTPUT = "shared/alignment_gujarat.geojson"
-DEFAULT_ROADS_OUTPUT = "shared/roads_gujarat.geojson"
-DEFAULT_CORRIDOR_OUTPUT = "shared/corridor_2km.geojson"
+# output paths and the crossing_id prefix default from the region (--region, else the --state
+# name, else the boundary file's name) - see geo_utils.region_paths()
 
 # accepted here, and by irc_classify._HIGHWAY_TO_IRC - a road classified into
 # one of these OSM-vocabulary buckets (either passed through directly from a
@@ -336,9 +335,20 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
     return gpd.GeoDataFrame(rows, geometry="geometry", crs=align.crs)
 
 
+def _is_route_number(ref) -> bool:
+    """A ref that names one route (NH48, SH-17, NH-6/AH-46), not just a road
+    class - most NIC refs are the bare class code ("SH", "ODR", "NH"), which
+    every road of that class shares."""
+    return isinstance(ref, str) and any(ch.isdigit() for ch in ref)
+
+
 def merge_dual_carriageways(cand: gpd.GeoDataFrame, tol_m: float) -> gpd.GeoDataFrame:
     """R5: two road segments within tol_m on the same align segment that share
-    a ref are one physical crossing (divided highway) - keep one row."""
+    a route number are one physical crossing (divided highway) - keep one row.
+    A bare class code never merges: two different district roads 30 m apart
+    would otherwise lose one of them here, before it's ever measured. Divided
+    roads without a route number are merged later, from the measured widths
+    (structure_decide.py R9)."""
     cand = cand.sort_values(["align_id", "chainage_m"]).reset_index(drop=True)
     cand["dual_carriageway"] = False
     used = set()
@@ -346,7 +356,7 @@ def merge_dual_carriageways(cand: gpd.GeoDataFrame, tol_m: float) -> gpd.GeoData
     for i, row in cand.iterrows():
         if i in used:
             continue
-        if row["ref"]:
+        if _is_route_number(row["ref"]):
             group = cand[
                 (cand["align_id"] == row["align_id"])
                 & (cand["ref"] == row["ref"])
@@ -364,8 +374,13 @@ def merge_dual_carriageways(cand: gpd.GeoDataFrame, tol_m: float) -> gpd.GeoData
 
 
 def build_barrier_graph(roads: gpd.GeoDataFrame, align: gpd.GeoDataFrame, align_barrier) -> nx.Graph:
-    """Split every road that crosses the alignment at the crossing point, so
-    the two halves never share a graph node - the alignment acts as a wall."""
+    """Road network as a graph: every road vertex is a node and every segment
+    between two vertices an edge, so two roads that share a vertex anywhere
+    along their length are connected - NIC road lines run straight through
+    junctions, with side roads joining at an intermediate vertex, so joining
+    lines by their end points only would miss most junctions. Every road
+    that crosses the alignment is split at the crossing point, so the two
+    halves never share a graph node - the alignment acts as a wall."""
 
     def side_of(pt: Point, align_row) -> int:
         d = align_row.geometry.project(pt)
@@ -398,39 +413,59 @@ def build_barrier_graph(roads: gpd.GeoDataFrame, align: gpd.GeoDataFrame, align_
             mid = part.interpolate(0.5, normalized=True)
             nearest_align = min(align_rows, key=lambda r: r.geometry.distance(mid))
             s = side_of(mid, nearest_align)
-            u = node_key(part.coords[0], s)
-            v = node_key(part.coords[-1], s)
-            if u == v:
-                continue
-            G.add_edge(u, v, length=part.length)
+            coords = [c[:2] for c in part.coords]
+            # only a part's two ends can sit on the alignment (it was split there); every
+            # vertex in between is a plain node, shared with any other road that passes through it
+            keys = [node_key(coords[0], s)] + [(round(x, 1), round(y, 1)) for x, y in coords[1:-1]] \
+                + [node_key(coords[-1], s)]
+            for (a, b), u, v in zip(zip(coords, coords[1:]), keys, keys[1:]):
+                if u != v:
+                    G.add_edge(u, v, length=math.dist(a, b))
     return G
 
 
 def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, corridor,
                              min_component_len_m: float, junction_flag_m: float, skew_flag_deg: float) -> gpd.GeoDataFrame:
-    inner = corridor.buffer(-5.0)
+    inner = prep(corridor.buffer(-5.0))
+    comp_of, comps, comp_ok = {}, [], {}
+    for i, comp in enumerate(nx.connected_components(G)):
+        comps.append(comp)
+        comp_of.update(dict.fromkeys(comp, i))
 
     def connected(n) -> bool:
-        comp = nx.node_connected_component(G, n)
-        leaves_window = any(
-            not inner.contains(Point(k)) for k in comp if not (isinstance(k, tuple) and k and k[0] == "X")
-        )
-        subg = G.subgraph(comp)
-        has_junction = any(deg >= 3 for _, deg in subg.degree())
-        comp_len = sum(d.get("length", 0.0) for _, _, d in subg.edges(data=True))
-        return leaves_window or (has_junction and comp_len >= min_component_len_m)
+        i = comp_of[n]
+        if i not in comp_ok:  # one answer per component - with a node per vertex, components are large
+            comp = comps[i]
+            leaves_window = any(
+                not inner.contains(Point(k)) for k in comp if not (isinstance(k, tuple) and k and k[0] == "X")
+            )
+            subg = G.subgraph(comp)
+            has_junction = any(deg >= 3 for _, deg in subg.degree())
+            comp_len = sum(d.get("length", 0.0) for _, _, d in subg.edges(data=True))
+            comp_ok[i] = leaves_window or (has_junction and comp_len >= min_component_len_m)
+        return comp_ok[i]
+
+    # the two halves' nodes at each crossing point: the nearest on each side within 0.5 m, rather
+    # than an exact 0.1 m-rounded key - a rounding miss would otherwise drop a real crossing as
+    # R2. Nearest, because another road can cross the alignment a few decimetres away
+    x_nodes = [n for n in G.nodes if isinstance(n, tuple) and n and n[0] == "X"]
 
     def decide(pt: Point):
-        xy = (round(pt.x, 1), round(pt.y, 1))
-        ends = [n for n in ((("X", xy, 1)), (("X", xy, -1))) if n in G]
+        nearest = {}
+        for n in x_nodes:
+            d = math.dist(n[1], (pt.x, pt.y))
+            if d < 0.5 and d < nearest.get(n[2], (math.inf,))[0]:
+                nearest[n[2]] = (d, n)
+        ends = [n for _, n in nearest.values()]
         if len(ends) < 2:
             return "no_crossing", "R2", "road ends at the alignment - only one side present in the network"
-        ok = [connected(n) for n in ends]
-        if all(ok):
+        if all(connected(n) for n in ends):
             return "crossing", "R1", "both halves reach another road or leave the corridor window"
-        if not any(ok):
-            return "no_crossing", "R3", "neither half connects to the wider network - check the map"
-        return "review", "R4", "one half dead-ends close to the alignment - check imagery for buildings/habitation"
+        # no R3 ("neither half connects -> no crossing"): a road the alignment physically cuts through
+        # is never dropped just because the road data doesn't join it up - NIC is a merge of state
+        # exports with gaps between them, so an unconnected line is a data gap, not a missing road
+        return "review", "R4", ("one or both halves dead-end near the alignment without reaching the wider "
+                                "network - check imagery for buildings/habitation and whether the road carries on")
 
     decisions = cand.geometry.apply(decide)
     cand["decision"] = decisions.apply(lambda t: t[0])
@@ -505,22 +540,45 @@ def parse_args():
                      help="Glob for local NIC road parquet file(s) to load and crop to the corridor")
     ap.add_argument("--min-segment-m", type=float, default=50.0, help="Drop alignment slivers shorter than this after clipping")
     ap.add_argument("--epsg", type=int, default=None, help="Metric CRS to work in. Default: auto-detect UTM zone from the data's centroid")
-    ap.add_argument("--id-prefix", default="GJ", help="Prefix for generated crossing_id values, e.g. GJ-001")
-    ap.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output crossings GeoJSON")
-    ap.add_argument("--summary-csv", default=DEFAULT_SUMMARY_CSV, help="Output crossings summary CSV")
-    ap.add_argument("--alignment-output", default=DEFAULT_ALIGNMENT_OUTPUT, help="Where to save the clipped alignment")
-    ap.add_argument("--roads-output", default=DEFAULT_ROADS_OUTPUT, help="Where to save the loaded road network")
-    ap.add_argument("--corridor-output", default=DEFAULT_CORRIDOR_OUTPUT, help="Where to save the corridor polygon")
+    ap.add_argument("--region", default=None,
+                     help="Name for this run's files (output/<region>_crossings.geojson, shared/roads_<region>.geojson, "
+                          "...) - pass the same --region to the later steps. Default: the --state name, else the "
+                          "--boundary file's name (gujarat for the default boundary), or 'all' when unclipped")
+    ap.add_argument("--id-prefix", default=None,
+                     help="Prefix for generated crossing_id values, e.g. MH-001. Default: the region's state code")
+    ap.add_argument("-o", "--output", default=None, help="Output crossings GeoJSON. Default: output/<region>_crossings.geojson")
+    ap.add_argument("--summary-csv", default=None, help="Output crossings summary CSV")
+    ap.add_argument("--alignment-output", default=None, help="Where to save the clipped alignment")
+    ap.add_argument("--roads-output", default=None, help="Where to save the loaded road network")
+    ap.add_argument("--corridor-output", default=None, help="Where to save the corridor polygon")
     ap.add_argument("--min-component-len-m", type=float, default=300.0, help="Min network length for a component without leaving the corridor to count as connected")
     ap.add_argument("--dual-merge-tol-m", type=float, default=30.0, help="R5: merge distance for same-ref dual-carriageway crossings")
     ap.add_argument("--junction-flag-m", type=float, default=50.0, help="R6: flag a crossing within this of an existing junction")
     ap.add_argument("--skew-flag-deg", type=float, default=45.0, help="R7: flag a crossing angle below this")
     ap.add_argument("--nearby-crossing-flag-m", type=float, default=40.0, help="R8: flag another crossing on the same segment within this distance")
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    if args.region is None:
+        if args.state is not None:
+            args.region = args.state
+        elif args.boundary == "":
+            args.region = "all"
+        else:
+            args.region = Path(args.boundary or DEFAULT_BOUNDARY).stem
+    args.region = region_slug(args.region)
+    paths = region_paths(args.region)
+    for arg, key in (("output", "crossings"), ("summary_csv", "crossings_summary"), ("alignment_output", "alignment"),
+                     ("roads_output", "roads"), ("corridor_output", "corridor")):
+        if getattr(args, arg) is None:
+            setattr(args, arg, paths[key])
+    if args.id_prefix is None:
+        args.id_prefix = region_prefix(args.region)
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    print(f"region: {args.region} - crossing ids {args.id_prefix}-001..., outputs {args.output}, {args.roads_output}")
 
     align = prepare_alignment(args)
     epsg = align.attrs["epsg"]
@@ -559,6 +617,7 @@ def main() -> None:
 
     write_geojson(cand_wgs, Path(args.output))
     write_csv(cand_wgs.drop(columns="geometry"), Path(args.summary_csv))
+    remember_region(args.region)  # the later steps default to this region
 
     print(f"\nwrote {args.output}")
     print(f"wrote {args.summary_csv}")
@@ -566,7 +625,8 @@ def main() -> None:
     print(cand_wgs["decision"].value_counts().to_string())
     print("\nBy IRC class:")
     print(cand_wgs.groupby(["irc_class", "decision"]).size().to_string())
-    print("\nAll design widths/spans are pending SAM3 measurement - run src/measure_width_sam3.py next.")
+    print(f"\nAll design widths/spans are pending SAM3 measurement - run next:\n"
+          f"  python src/measure_width_sam3.py --region {args.region}")
     nearby = cand_wgs[cand_wgs["nearby_crossing_id"].notna()]
     if len(nearby):
         print(f"\n{len(nearby) // 2} pair(s) flagged R8 (another crossing within {args.nearby_crossing_flag_m:.0f} m - "

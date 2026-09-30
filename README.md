@@ -1,13 +1,14 @@
 # Railway Alignment Crossing Finder
 
-Finds every point where a road crosses a proposed railway alignment, decides which ones need a grade-separated structure (no level crossings are permitted on new lines per the Railway Board's Aug 2023 directive), measures the road's width from satellite imagery, and computes the span the structure needs along the track.
+Finds every point where a road crosses a proposed railway alignment, decides which ones need a grade-separated structure (no level crossings are permitted on new lines per the Railway Board's Aug 2023 directive), measures the road's width from satellite imagery, and decides what structure each one gets — a standard box culvert, a bridge with its span along the track, or no structure because the road can be re-routed.
 
 **This works for any railway alignment, anywhere** — not tied to any specific line or state. Give it a centreline file and (optionally) a boundary polygon for the state/region you care about, and it does the rest. This checkout happens to come with one example alignment and one example state boundary already sitting in `input/` so you can try it immediately with no arguments, but nothing about the tool itself is specific to them.
 
-Two commands do the whole job:
+Three commands do the whole job:
 
 1. **`crossing_identify.py`** — clip the alignment, fetch the road network, find every crossing, decide which need a structure.
-2. **`measure_width_sam3.py`** — measure each crossing's road width with SAM3, and write the final register.
+2. **`measure_width_sam3.py`** — measure each crossing's road width with SAM3, and write the measured register.
+3. **`structure_decide.py`** — merge crossings that are really one road corridor, then decide box culvert / bridge / re-route and size it. Pure rules, no model — rerun it whenever a threshold or the box table changes.
 
 ---
 
@@ -47,16 +48,30 @@ python -m venv .venv
     --alignment my_line.geojson --boundary my_state.geojson --corridor-km 1.5 -o my_crossings.geojson
 .venv\Scripts\python.exe src\measure_width_sam3.py `
     --crossings my_crossings.geojson --roads shared\roads_my_line.geojson -o my_crossings_final.geojson
+.venv\Scripts\python.exe src\structure_decide.py `
+    --register my_crossings_final.geojson --alignment shared\alignment_my_line.geojson -o my_structures.geojson
 .venv\Scripts\python.exe src\make_review_map.py
 ```
 
-`--alignment` is any centreline file geopandas can read; `--boundary` is any polygon to clip it to (a state, a district, a custom AOI). Pass `--boundary ""` to run against the whole alignment input, unclipped. Both commands take arguments for every input file, output path, and rule threshold — run either with `--help` for the full list.
+`--alignment` is any centreline file geopandas can read; `--boundary` is any polygon to clip it to (a state, a district, a custom AOI). Pass `--boundary ""` to run against the whole alignment input, unclipped. Every command takes arguments for every input file, output path, and rule threshold — run any of them with `--help` for the full list.
 
-**Quick try with no arguments** — both commands fall back to the example alignment/boundary already bundled under `input/` in this checkout, so you can run the same three commands above with no flags at all and get a working result immediately:
+**Regions.** Every file is named after the region it's for, so runs for different states never overwrite or get mixed up with each other. `crossing_identify.py --state Maharashtra` writes `output/maharashtra_crossings.geojson`, `shared/roads_maharashtra.geojson`, … with crossing ids `MH-001`, … (the region is the `--state` name, else the `--boundary` file's name, or `--region` to set it yourself). It also remembers that region in `output/last_region.txt`, so the later commands pick up the same files with no arguments; pass `--region gujarat` (or any explicit path) to any of them to work on another one.
+
+```powershell
+.venv\Scripts\python.exe src\crossing_identify.py --state Maharashtra
+.venv\Scripts\python.exe src\measure_width_sam3.py        # = --region maharashtra
+.venv\Scripts\python.exe src\structure_decide.py
+.venv\Scripts\python.exe src\make_review_map.py           # output/maharashtra_review_map.html
+```
+
+If a file was open in QGIS when a step tried to overwrite it, the step writes a `.tmp` copy beside it instead; the next step reads that newer copy automatically.
+
+**Quick try with no arguments** — every command falls back to the example alignment/boundary already bundled under `input/` in this checkout, so you can run the same commands above with no flags at all and get a working result immediately:
 
 ```powershell
 .venv\Scripts\python.exe src\crossing_identify.py
 .venv\Scripts\python.exe src\measure_width_sam3.py
+.venv\Scripts\python.exe src\structure_decide.py
 .venv\Scripts\python.exe src\make_review_map.py
 ```
 
@@ -70,22 +85,22 @@ Open the resulting HTML file in a browser afterward to see the results on a map.
 .venv\Scripts\python.exe src\measure_width.py                 # SAM2 instead of SAM3 (no gated access needed, kept as a fallback/comparison)
 ```
 
----
+---python src/make)
 
 ## 3. How it works, in simple terms
 
 ### Step 1 — `crossing_identify.py`: find the crossings
 
 1. **Clip the alignment.** Reads the rail centreline and cuts it down to just the part inside the given boundary polygon.
-2. **Fetch the road network.** Downloads every road from OpenStreetMap within a corridor around that alignment (2km either side, by default).
+2. **Fetch the road network.** Loads every road from the local NIC road data (`input/Roads/*.parquet`) within a corridor around that alignment (2km either side, by default).
 3. **Find every crossing.** Wherever a road physically intersects the alignment, record the point, how far along the alignment it is (`chainage_m`), and the angle between the road and the track (`angle_deg`).
 4. **Classify the road.** Each road gets sorted into an IRC category (`NH`/`SH`/`MDR`/`ODR`/`VR`/`TRK`/`PTH`/`EXP`) based on its OpenStreetMap tags. This class **no longer sets the design width** — it's used later only to flag a measurement as suspicious if it doesn't look right for that kind of road.
-5. **Decide whether a structure is needed** (rules R1–R8):
+5. **Decide whether a structure is needed** (rules R1, R2, R4–R8). The road network is joined up at every shared vertex, not just at line ends — NIC road lines run straight through junctions.
    - **R1** — the road connects to the wider network on both sides → **needs a structure**.
    - **R2** — the road just dead-ends at the alignment on one side → **no structure needed**.
-   - **R3** — neither side connects to anything → **no structure**, likely a mapping error.
-   - **R4** — one side dead-ends close by, ambiguous → **flagged for review**.
-   - **R5** — two OSM road segments right next to each other sharing the same route number (a divided highway) → merged into one crossing.
+   - **R3** — *removed.* It used to drop a crossing as "no structure, likely a mapping error" when neither side connected to anything. In NIC data an unconnected road line is a gap between state datasets, not a missing road, so a road the alignment actually cuts through is never dropped this way — that case now goes to R4.
+   - **R4** — one or both sides dead-end near the alignment without reaching the wider network → **flagged for review**.
+   - **R5** — two road segments right next to each other sharing the same route number (a divided highway, e.g. both `NH48`) → merged into one crossing. Only a real route number counts: most NIC refs are just the class code (`SH`, `ODR`), which every road of that class shares, so those never merge here — divided roads without a route number are merged later from their measured widths (R9 in step 3).
    - **R6** — flagged if within 50m of an existing road junction.
    - **R7** — flagged if the crossing angle is sharp (below 45°) — the structure will need to be much longer than the road is wide.
    - **R8** — flagged if another crossing sits within 40m on the same alignment segment — usually the same road mapped twice, or a genuine parallel track; needs a human decision on whether it's one structure or two.
@@ -95,15 +110,43 @@ Output: one GeoJSON file, one row per crossing, with a decision but no width yet
 ### Step 2 — `measure_width_sam3.py`: measure the road and finish the register
 
 1. **Fetch a satellite image** of each crossing (a small crop, roughly 200×200m) via `src/imagery.py`. The intended, licensed source for this kind of automated analysis is **Esri World Imagery** — that's what the tile URL should point to for a real run. **Currently `imagery.py`'s `TILE_URL` is set to Google's tile server instead**, for an ad hoc manual comparison. Google's terms don't license this kind of automated, bulk use — switch `TILE_URL` back to the Esri endpoint before running this at scale.
-2. **Segment the road** using SAM3, prompted with the word "road" — it finds every road-shaped object in the crop, and the one sitting at the known crossing point is picked. If a divided highway shows up as two separate pieces (split by the median), they're merged into one.
+2. **Segment the road** using SAM3, prompted with the word "road" — it finds every road-shaped object in the crop, and the one sitting at the known crossing point is picked. Any other road piece within 20 m of it (the other carriageway across a median, a service road) is added to the mask too.
 3. **Measure the width** on 5 lines drawn across the road (perpendicular to it, at 5 points along its length). If the exact expected point doesn't land on the road in the image (a common mismatch between OpenStreetMap's road position and the true position visible in the imagery), it searches nearby for the actual road before measuring.
-4. **Flag a measurement SUSPECT** if the 5 lines disagree with each other too much, or if the result doesn't look plausible for that road's IRC class (from step 1). A SUSPECT measurement is still used — it's just labelled, not thrown away or replaced with anything else.
-5. **Compute the final numbers:**
-   - `design_width_m` — the road's measured width. Always comes from SAM3; there's no other source.
-   - `span_m` — the length the structure needs **along the railway track**: `design_width_m ÷ sin(crossing angle)`. At a square (90°) crossing this equals the road width; at a shallow angle it can be much longer.
+4. **Read the whole road corridor.** Each of those lines keeps walking past the road edge: any further road within 20 m, edge to edge, is recorded too. The result is the layout from one side to the other — road | gap | road — in `road_layout_m`, with `total_width_m` edge to edge and, for exactly two roads, `cw1_width_m` / `median_width_m` / `cw2_width_m`.
+5. **Flag a measurement SUSPECT** if the 5 lines disagree with each other too much, or if the result doesn't look plausible for that road's IRC class (from step 1). A SUSPECT measurement is still used — it's just labelled, not thrown away or replaced with anything else.
+6. **`design_width_m`** — the width of the road at the crossing point itself. Always comes from SAM3; there's no other source. The span is not worked out here any more — whether there is a span at all depends on the structure (step 3).
 
-Output: the finished register (GeoJSON + CSV), plus a QA image per crossing so every automated measurement can be checked visually.
+Output: the measured register (GeoJSON + CSV), plus a QA image per crossing so every automated measurement can be checked visually (the combined layout is printed on it in cyan).
+
+### Step 3 — `structure_decide.py`: decide and size the structure
+
+First, **R9 — corridor merge.** Crossings on the same alignment segment whose roads are within 20 m of each other, edge to edge, and roughly parallel, are one road corridor: the two carriageways of a divided highway, a service road beside it, or the same road mapped as two lines. They get **one** structure over their combined width; the others are marked `MERGED` with `merged_into` pointing at the one that carries the structure (the highest road class). Widths are combined as the union of where each road sits in the imagery, so a carriageway two crossings both measured is only counted once.
+
+Then, for each structure (the first rule that matches sets `structure_type`; flags add up and never change it):
+
+| Rule | Condition | Result |
+|---|---|---|
+| S0 | no structure needed (R2) | `NONE` |
+| S1 | minor road — village road, street, cart track, path | `NIL_REROUTE`: re-routed to the nearest structure. Flag `CLASS_CHECK` if it looks too wide for its class |
+| S2 | major road (EXP/NH/SH/MDR/ODR — every NIC "District Road" counts) with no width | `PENDING_SURVEY` |
+| S3 | crossing angle below 45° (same as R7) | flag `HIGH_SKEW`; `span_m` stays empty whatever the structure |
+| S4 | more than one road (divided per R5, or 2+ roads in the combined layout) | `DUAL_DESIGNER_DECISION`: one box over the whole width, a split twin-cell box (one cell per carriageway, wall in the median) and a bridge are all worked out; `structure_suggested` is the first that fits |
+| S5 | one road, opening fits a standard box | `BOX`, smallest standard size — square to the road, so no span |
+| S6 | one road, opening wider than any standard box | `BRIDGE`, `span_m = opening ÷ sin(crossing angle)` |
+
+- `opening_width_m` = combined width + 1 m buffer each side (`--edge-buffer-m`).
+- Box sizes come from `config/box_sizes.csv`, taken from the RDSO "DFC Loading" tables (single cell double track, 1–6 m spans; twin cell 4–6 m). A box's height is the smallest standard height clearing 5.5 m (`--clearance-m`, the organisation's major-road clearance), so in practice 6.0 m. The largest standard box is 6 m, so any road with an opening over 6 m gets a bridge.
+- Other flags: `SUSPECT_WIDTH`, `BORDERLINE` (opening within 0.5 m of the 6 m box limit), `CORRIDOR_MERGED`, `LAYOUT_APPROX` (some merged crossing has no imagery road edges), `DUAL_MISMATCH` (road data and imagery disagree on divided), `CONNECTIVITY_REVIEW` (R4), `NEAR_JUNCTION` (R6), `NEARBY_CROSSING` (R8, not already merged), `ROAD_OFFSET` (the road in the imagery meets the track more than 10 m from where the road data's line does — check the QA crop).
+- The codes and standards behind these rules are listed in `codes/SOURCES.md`.
+
+Output: the structure register (`output/gujarat_structures.geojson` + CSV) and a geometry layer drawn to scale, with a `kind` per line:
+
+- `width` — the measured road width, across the road (so it sits at the crossing angle to the track);
+- `extent` — outer edge to outer edge when several roads were combined;
+- `span` — the structure length, along the track (none for a box, or for a high-skew crossing).
+
+All of them are drawn where the road in the imagery meets the track (`span_centre_chainage_m`), so for each crossing they cross each other at one point. Style or filter the layer by `kind` in QGIS.
 
 ### The review map
 
-`make_review_map.py` builds an interactive HTML page with the alignment, every crossing colour-coded by decision, and a toggleable Google Satellite layer for visual reference only (never downloaded or processed by any script — just a live map layer for a person to look at, the same as adding it in QGIS by hand).
+`make_review_map.py` builds an interactive HTML page with the alignment, every crossing colour-coded by structure type (or by decision, before `structure_decide.py` has run), and a toggleable Google Satellite layer for visual reference only (never downloaded or processed by any script — just a live map layer for a person to look at, the same as adding it in QGIS by hand).

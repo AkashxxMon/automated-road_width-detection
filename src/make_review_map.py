@@ -12,11 +12,13 @@ register for anything beyond prototyping - see the imagery-licensing
 note in the project brief / README.
 
 Usage:
-    python src/make_review_map.py
+    python src/make_review_map.py                       # the region crossing_identify.py last ran for
+    python src/make_review_map.py --region maharashtra
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import folium
@@ -24,14 +26,17 @@ import geopandas as gpd
 import pandas as pd
 from folium.plugins import MeasureControl
 
-CROSSINGS_BASE = "output/gujarat_crossings.geojson"
-CROSSINGS_FINAL = "output/gujarat_crossings_final_gl.geojson"  # written by src/measure_width_sam3.py, if it's been run
-ALIGNMENT = "shared/alignment_gujarat.geojson"
-VALIDATION = "output/gujarat_validation.geojson"  # optional - written by src/validate.py
-OUT_HTML = "output/gujarat_review_map.html"
+from geo_utils import latest, region_paths, resolve_region
+
+VALIDATION = "output/gujarat_validation.geojson"  # optional - written by src/validate.py (Gujarat ground truth)
 
 DECISION_COLOR = {"crossing": "#EA4335", "review": "#F9AB00", "no_crossing": "#80868B"}
 DECISION_LABEL = {"crossing": "Crossing required", "review": "Review", "no_crossing": "No crossing"}
+STRUCTURE_COLOR = {"BRIDGE": "#EA4335", "BOX": "#1E8E3E", "DUAL_DESIGNER_DECISION": "#8E24AA",
+                   "PENDING_SURVEY": "#F9AB00", "NIL_REROUTE": "#9AA0A6", "NONE": "#5F6368"}
+STRUCTURE_LABEL = {"BRIDGE": "Bridge", "BOX": "Box culvert", "DUAL_DESIGNER_DECISION": "Divided road - designer decides",
+                   "PENDING_SURVEY": "Major road - width pending", "NIL_REROUTE": "Minor road - re-route",
+                   "NONE": "No structure"}
 
 GOOGLE_SAT_URL = "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
 GOOGLE_SAT_ATTR = (
@@ -40,7 +45,7 @@ GOOGLE_SAT_ATTR = (
 )
 
 
-def popup_html(row) -> str:
+def popup_html(row, crops_dir: str) -> str:
     def fmt(v, suffix=""):
         return "-" if v is None or (isinstance(v, float) and v != v) else f"{v}{suffix}"
 
@@ -52,7 +57,19 @@ def popup_html(row) -> str:
             f'<b>Auto-measured:</b> <span style="color:{color}">{row["measured_width_m"]} m</span> '
             f'({fmt(row.get("measured_by"))})<br>'
             f'<span style="color:#5f6368;font-size:12px">{fmt(row.get("notes"))}</span><br>'
-            f'<a href="width_crops/{row["crossing_id"]}.jpg" target="_blank">QA crop &rarr;</a><br>'
+            f'<a href="{crops_dir}/{row["crossing_id"]}.jpg" target="_blank">QA crop &rarr;</a><br>'
+        )
+
+    structure_bits = ""
+    if "structure_type" in row.index:
+        suggested = f" (suggested: {row['structure_suggested']})" if pd.notna(row.get("structure_suggested")) else ""
+        structure_bits = (
+            f"<b>Structure:</b> {STRUCTURE_LABEL.get(row['structure_type'], row['structure_type'])}{suggested} "
+            f"&middot; {row['structure_rule']}<br>"
+            f'<span style="color:#5f6368;font-size:12px">{fmt(row.get("structure_reason"))}</span><br>'
+            f"<b>Opening:</b> {fmt(row.get('opening_width_m'), ' m')} &middot; <b>Box:</b> {fmt(row.get('box_size'))}"
+            f" &middot; <b>Split box:</b> {fmt(row.get('box_split_size'))}<br>"
+            f"<b>Flags:</b> {fmt(row.get('structure_flags'))}<br>"
         )
 
     return f"""
@@ -65,6 +82,7 @@ def popup_html(row) -> str:
       <b>Crossing angle:</b> {fmt(row['angle_deg'], '&deg;')}<br>
       {measured_bits}
       <b>Design width:</b> {fmt(row['design_width_m'], ' m')} ({row['width_source']})<br>
+      {structure_bits}
       <b>Span along track:</b> {fmt(row['span_m'], ' m')}<br>
       <b>Near junction:</b> {row['near_junction']} &middot; <b>Skewed (&lt;45&deg;):</b> {row['skewed']}
     </div>
@@ -72,16 +90,24 @@ def popup_html(row) -> str:
 
 
 def main() -> None:
-    if Path(CROSSINGS_FINAL).exists():
-        crossings_path = CROSSINGS_FINAL
-    elif Path(CROSSINGS_BASE).exists():
-        crossings_path = CROSSINGS_BASE
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--region", default=None, help="Region to map. Default: the region crossing_identify.py last ran for")
+    args = ap.parse_args()
+    region = resolve_region(args.region)
+    paths = region_paths(region)
+    out_html = paths["review_map"]
+    # the furthest-along register there is: structures, else measured widths, else just the crossings
+    for key in ("structures", "final", "crossings"):
+        crossings_path = latest(paths[key])
+        if crossings_path.exists():
+            break
     else:
-        raise SystemExit(f"Neither {CROSSINGS_FINAL} nor {CROSSINGS_BASE} exists - run src/crossing_identify.py first")
+        raise SystemExit(f"No {paths['crossings']} - run src/crossing_identify.py for {region} first")
+    crops_dir = Path(paths["images_dir"]).relative_to(Path(out_html).parent).as_posix()
     print(f"using {crossings_path}")
 
     crossings = gpd.read_file(crossings_path)
-    align = gpd.read_file(ALIGNMENT)
+    align = gpd.read_file(latest(paths["alignment"]))
 
     center = [crossings.geometry.y.mean(), crossings.geometry.x.mean()]
     m = folium.Map(location=center, zoom_start=10, tiles="OpenStreetMap", control_scale=True)
@@ -95,7 +121,7 @@ def main() -> None:
         max_zoom=21,
     ).add_to(m)
 
-    align_layer = folium.FeatureGroup(name="Proposed alignment (Gujarat)", show=True)
+    align_layer = folium.FeatureGroup(name=f"Proposed alignment ({region})", show=True)
     for _, row in align.iterrows():
         folium.PolyLine(
             [(lat, lon) for lon, lat, *_ in row.geometry.coords],
@@ -104,9 +130,14 @@ def main() -> None:
         ).add_to(align_layer)
     align_layer.add_to(m)
 
-    for decision, label in DECISION_LABEL.items():
-        layer = folium.FeatureGroup(name=f"{label} ({(crossings['decision'] == decision).sum()})", show=True)
-        subset = crossings[crossings["decision"] == decision]
+    # one layer per structure type once structure_decide.py has run, else per connectivity decision
+    if "structure_type" in crossings.columns:
+        by, labels, colors = "structure_type", STRUCTURE_LABEL, STRUCTURE_COLOR
+    else:
+        by, labels, colors = "decision", DECISION_LABEL, DECISION_COLOR
+    for key, label in labels.items():
+        layer = folium.FeatureGroup(name=f"{label} ({(crossings[by] == key).sum()})", show=key not in ("NIL_REROUTE", "NONE"))
+        subset = crossings[crossings[by] == key]
         for _, row in subset.iterrows():
             folium.CircleMarker(
                 location=(row.geometry.y, row.geometry.x),
@@ -114,14 +145,14 @@ def main() -> None:
                 color="#202124",
                 weight=1,
                 fill=True,
-                fill_color=DECISION_COLOR[decision],
+                fill_color=colors[key],
                 fill_opacity=0.9,
-                popup=folium.Popup(popup_html(row), max_width=320),
+                popup=folium.Popup(popup_html(row, crops_dir), max_width=320),
                 tooltip=f"{row['crossing_id']} - {row['name'] or row['highway']}",
             ).add_to(layer)
         layer.add_to(m)
 
-    if Path(VALIDATION).exists():
+    if region == "gujarat" and Path(VALIDATION).exists():
         val = gpd.read_file(VALIDATION)
         for matched, label, color in [(True, "matched", "#188038"), (False, "missed", "#8E24AA")]:
             subset = val[val["matched"] == matched]
@@ -145,9 +176,9 @@ def main() -> None:
     # the ruler in Google Earth Pro. See src/make_survey_worksheet.py.
     MeasureControl(primary_length_unit="meters", secondary_length_unit=None, active_color="#EA4335").add_to(m)
 
-    Path(OUT_HTML).parent.mkdir(exist_ok=True)
-    m.save(OUT_HTML)
-    print(f"wrote {OUT_HTML}")
+    Path(out_html).parent.mkdir(exist_ok=True)
+    m.save(out_html)
+    print(f"wrote {out_html}")
     print("Open it in a browser. Turn on 'Google Satellite Hybrid' in the layer")
     print("control (top right) to visually check width/habitation for a given")
     print("crossing - tiles load live from Google and are not saved anywhere.")

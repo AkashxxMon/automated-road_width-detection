@@ -1,7 +1,11 @@
 """One command: measure road width at every crossing using SAM3 segmentation
 on Esri World Imagery, and merge the results straight into the crossing
-register - populating design_width_m/span_m/width_source, saving a QA
+register - populating design_width_m/width_source (plus the combined
+layout of every road within 20 m of it - the other carriageway of a
+divided road, a service road - where the imagery shows one), saving a QA
 image per crossing, and writing the raw measurement data to a CSV.
+Box/bridge call, box size and span along track are the next step,
+structure_decide.py.
 
 SAM3 (facebook/sam3, "Promptable Concept Segmentation") is prompted with
 a text concept (default "road") and returns every matching instance in
@@ -10,7 +14,7 @@ point. The OSM road tangent (from the roads file crossing_identify.py
 already wrote) is only used to orient the 5 perpendicular transects, not
 for prompting. No per-image human interaction.
 
-Design width and span come entirely from this measurement - there is no
+Design width comes entirely from this measurement - there is no
 IRC minimum floor. The IRC class (from crossing_identify.py) is used only
 to flag a measurement as SUSPECT when it's implausible for that class of
 road (or the 5 transects disagree too much) - see resolve_width() - so a
@@ -30,7 +34,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 
 import geopandas as gpd
@@ -38,22 +41,18 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image, ImageFilter
-from shapely.geometry import LineString, Point
-from shapely.ops import substring
 
-from geo_utils import get_utm_epsg, write_csv, write_geojson
+from geo_utils import fill_region_paths, get_utm_epsg, latest, write_csv, write_geojson
 from imagery import fetch_crop
 from irc_classify import plausible_range
-from width_core import measure_transects_detailed, road_tangent_bearing, save_qa_image
+from width_core import (MAX_ROAD_GAP_M, combine_roads, measure_transects_detailed, road_layout_text,
+                        road_tangent_bearing, save_qa_image, write_width_geometry)
 
-DEFAULT_CROSSINGS = "output/gujarat_crossings.geojson"
-DEFAULT_ROADS = "shared/roads_gujarat.geojson"
-DEFAULT_ALIGNMENT = "shared/alignment_gujarat.geojson"
-DEFAULT_OUTPUT = "output/gujarat_crossings_final_gl.geojson"
-DEFAULT_CSV_OUTPUT = "output/gujarat_crossings_final_gl.csv"
-DEFAULT_SURVEY_CSV = "output/gujarat_width_survey_gl.csv"
-DEFAULT_IMAGES_DIR = "output/width_crops_sam3_gl_1"
-DEFAULT_WIDTH_GEOMETRY_OUTPUT = "output/gujarat_width_geometry_gl.geojson"
+# every input/output path defaults from the region (geo_utils.region_paths): --region, else the one
+# crossing_identify.py last ran for - any path passed explicitly wins
+REGION_PATH_ARGS = {"crossings": "crossings", "roads": "roads", "alignment": "alignment", "output": "final",
+                    "csv_output": "final_csv", "survey_csv": "survey_csv", "images_dir": "images_dir",
+                    "width_geometry_output": "width_geometry"}
 DEFAULT_MODEL_DIR = "model/sam3"
 
 DETECT_THRESHOLD = 0.4  # SAM3's own example uses 0.5; slightly looser since a small crop has few distractors
@@ -72,8 +71,9 @@ def load_model(model_dir: Path, device: str):
     return model, processor
 
 
-MERGE_NEARBY_M = 18.0  # bridge a gap up to this wide between separate SAM3 instances - covers a
-                       # typical divided-highway median so both carriageways measure as one road
+MERGE_NEARBY_M = MAX_ROAD_GAP_M  # union in any other SAM3 instance within this (20 m) - the other
+                                 # carriageway across a median, a service road - so the transect walk
+                                 # sees the whole road corridor (width_core.combine_roads)
 
 
 def _dilate(mask: np.ndarray, kernel_px: int) -> np.ndarray:
@@ -177,7 +177,13 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
         mask = pick_instance(results, center_px, h * w, mpp)
         detailed = measure_transects_detailed(mask, mpp, bearing, center_px) if mask is not None else []
         widths = [d["width_m"] for d in detailed]
-        save_qa_image(Path(args.images_dir) / f"{cid}.jpg", rgb, mask, bearing, mpp, center_px, widths)
+        # other roads within MAX_ROAD_GAP_M (the other carriageway, a service road) - kept alongside
+        # the single-road width, not folded into it: structure_decide.py spans the whole layout
+        combo = combine_roads(detailed) if widths else None
+        combo_label = (f"combined: {road_layout_text(combo['widths_m'], combo['gaps_m'])} = {combo['total_m']:.1f} m"
+                       if combo else None)
+        save_qa_image(Path(args.images_dir) / f"{cid}.jpg", rgb, mask, bearing, mpp, center_px, widths,
+                      extra_label=combo_label)
 
         if widths:
             med = float(np.median(widths))
@@ -188,7 +194,24 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
             if suspect:
                 conf = "low"
             flag = " SUSPECT" if suspect else ""
+            flag += f" ({combo_label})" if combo else ""
             print(f"  {cid}: {med:.1f} m (n={len(widths)}, iqr={iqr:.2f}, conf={conf}, zoom={zoom}){flag}")
+
+            def to_utm(px):
+                return pt_utm.x + (px[0] - center_px[0]) * mpp, pt_utm.y - (px[1] - center_px[1]) * mpp
+
+            combo_cols = {"n_roads": len(combo["widths_m"]) if combo else 1}
+            if combo:
+                (ext_p1_x, ext_p1_y), (ext_p2_x, ext_p2_y) = to_utm(combo["e1_px"]), to_utm(combo["e2_px"])
+                combo_cols.update({
+                    "road_layout_m": road_layout_text(combo["widths_m"], combo["gaps_m"]),
+                    "total_width_m": round(combo["total_m"], 2),
+                    "ext_p1_x": ext_p1_x, "ext_p1_y": ext_p1_y, "ext_p2_x": ext_p2_x, "ext_p2_y": ext_p2_y,
+                })
+                if len(combo["widths_m"]) == 2:
+                    combo_cols.update({"cw1_width_m": round(combo["widths_m"][0], 2),
+                                       "median_width_m": round(combo["gaps_m"][0], 2),
+                                       "cw2_width_m": round(combo["widths_m"][1], 2)})
 
             # the transect whose width is closest to the reported median is the one whose
             # edge pixels become the width-line geometry - not necessarily the geographically
@@ -196,15 +219,14 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
             center_transect = min(detailed, key=lambda d: abs(d["width_m"] - med))
             p1x, p1y = center_transect["p1_px"]
             p2x, p2y = center_transect["p2_px"]
-            width_p1_x = pt_utm.x + (p1x - center_px[0]) * mpp
-            width_p1_y = pt_utm.y - (p1y - center_px[1]) * mpp
-            width_p2_x = pt_utm.x + (p2x - center_px[0]) * mpp
-            width_p2_y = pt_utm.y - (p2y - center_px[1]) * mpp
+            width_p1_x, width_p1_y = to_utm((p1x, p1y))
+            width_p2_x, width_p2_y = to_utm((p2x, p2y))
 
             rows.append({"crossing_id": cid, "measured_width_m": round(med, 2),
                          "measured_by": f"SAM3({args.text})+EsriWorldImagery-auto(z{zoom})",
                          "notes": f"n={len(widths)} transects, IQR={iqr:.2f} m, confidence={conf}"
                                   + (" - SUSPECT: mask likely over-extended (tree cover/shadow), check QA crop" if suspect else ""),
+                         "width_iqr_m": round(iqr, 2), "n_transects": len(widths), **combo_cols,
                          "width_p1_x": width_p1_x, "width_p1_y": width_p1_y,
                          "width_p2_x": width_p2_x, "width_p2_y": width_p2_y})
         elif mask is None:
@@ -220,74 +242,28 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
 
 
 def resolve_width(row):
-    """design_width_m/span_m come from the SAM3 measurement alone - no IRC
-    floor, no substitution. A SUSPECT measurement is still used, just
-    labelled for review rather than trusted silently; there's no other
-    number to fall back to."""
+    """design_width_m comes from the SAM3 measurement alone - no IRC floor,
+    no substitution. A SUSPECT measurement is still used, just labelled for
+    review rather than trusted silently; there's no other number to fall
+    back to. span_m is left for structure_decide.py, since whether a span
+    applies at all depends on the box/bridge call (a box is always square)
+    and the skew gate."""
     if pd.isna(row["measured_width_m"]):
-        return None, "needs field/imagery survey", None
-    span = round(row["measured_width_m"] / math.sin(math.radians(max(row["angle_deg"], 1e-3))), 2)
+        return None, "needs field/imagery survey"
     source = "measured (SUSPECT - verify manually)" if "SUSPECT" in str(row["notes"]) else "measured"
-    return row["measured_width_m"], source, span
-
-
-def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, args) -> None:
-    """One combined layer, geometry drawn to scale, two kinds of line per
-    crossing:
-      - "width": the actual SAM3 measurement, the two road-edge pixels the
-        transect walk found - only present where a live SAM3 measurement ran
-        (not for a --measured-csv merge, which has no pixel geometry).
-      - "span": the length of structure needed *along the railway track*
-        (design_width_m / sin(angle) - see resolve_width()), drawn as the
-        real alignment geometry between chainage-span/2 and chainage+span/2,
-        not just a straight tangent segment, so it stays accurate on curves.
-    """
-    props = ["crossing_id", "align_name", "chainage_m", "irc_class", "angle_deg",
-              "measured_width_m", "design_width_m", "span_m", "width_source", "decision"]
-    props = [c for c in props if c in cross.columns]
-
-    width_rows = []
-    has_width_geom = cross[["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]].notna().all(axis=1) \
-        if "width_p1_x" in cross.columns else pd.Series(False, index=cross.index)
-    for _, r in cross[has_width_geom].iterrows():
-        geom = LineString([(r["width_p1_x"], r["width_p1_y"]), (r["width_p2_x"], r["width_p2_y"])])
-        width_rows.append({**{c: r[c] for c in props}, "kind": "width", "geometry": geom})
-
-    span_rows = []
-    if Path(args.alignment).exists() and "align_id" in cross.columns:
-        align = gpd.read_file(args.alignment).to_crs(epsg)
-        align_by_id = {row["align_id"]: row.geometry for _, row in align.iterrows()}
-        has_span = cross["span_m"].notna() & cross["chainage_m"].notna() & cross["align_id"].notna()
-        for _, r in cross[has_span].iterrows():
-            line = align_by_id.get(r["align_id"])
-            if line is None:
-                continue
-            half = r["span_m"] / 2.0
-            start = max(r["chainage_m"] - half, 0.0)
-            end = min(r["chainage_m"] + half, line.length)
-            if end <= start:
-                continue
-            geom = substring(line, start, end)
-            span_rows.append({**{c: r[c] for c in props}, "kind": "span", "geometry": geom})
-    else:
-        print(f"\n  [warn] {args.alignment} not found - skipping span-line geometry (width lines still written if available)")
-
-    if not width_rows and not span_rows:
-        print("\nno width/span geometry available (likely a --measured-csv run with no matching alignment) - "
-              "skipping width-geometry output")
-        return
-
-    combined = gpd.GeoDataFrame(width_rows + span_rows, geometry="geometry", crs=epsg).to_crs(4326)
-    write_geojson(combined, Path(args.width_geometry_output))
-    print(f"wrote {args.width_geometry_output} ({len(width_rows)} width line(s), {len(span_rows)} span line(s))")
+    return row["measured_width_m"], source
 
 
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--crossings", default=DEFAULT_CROSSINGS, help="Input crossings GeoJSON (from crossing_identify.py)")
-    ap.add_argument("--roads", default=DEFAULT_ROADS, help="Roads GeoJSON (from crossing_identify.py) - used for the transect bearing")
-    ap.add_argument("--alignment", default=DEFAULT_ALIGNMENT,
-                     help="Clipped alignment GeoJSON (from crossing_identify.py) - used to draw the span-line geometry")
+    ap.add_argument("--region", default=None,
+                     help="Region whose files to use (e.g. maharashtra, as crossing_identify.py printed). Default: the "
+                          "region crossing_identify.py last ran for. Any path below passed explicitly overrides it")
+    ap.add_argument("--crossings", default=None, help="Input crossings GeoJSON. Default: output/<region>_crossings.geojson")
+    ap.add_argument("--roads", default=None,
+                     help="Roads GeoJSON - used for the transect bearing. Default: shared/roads_<region>.geojson")
+    ap.add_argument("--alignment", default=None,
+                     help="Clipped alignment GeoJSON - used to draw span lines. Default: shared/alignment_<region>.geojson")
     ap.add_argument("--epsg", type=int, default=None, help="Metric CRS for measurement. Default: auto-detect UTM zone")
     ap.add_argument("--model-dir", default=DEFAULT_MODEL_DIR, help="Local SAM3 weights directory")
     ap.add_argument("--text", default="road", help="Concept prompt passed to SAM3")
@@ -295,23 +271,30 @@ def parse_args():
     ap.add_argument("--detect-threshold", type=float, default=DETECT_THRESHOLD, help="SAM3 instance-detection confidence threshold")
     ap.add_argument("--limit", type=int, default=None, help="Only measure the first N crossings (for testing)")
     ap.add_argument("--measured-csv", default=None,
-                     help="Skip SAM3 entirely and merge this CSV instead (crossing_id, measured_width_m[, measured_by, notes]) "
+                     help="Skip SAM3 entirely and merge this CSV instead (crossing_id, measured_width_m[, measured_by, notes, "
+                          "cw1_width_m, median_width_m, cw2_width_m, total_width_m]) "
                           "- e.g. a manual recheck from make_survey_worksheet.py")
-    ap.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output final crossings GeoJSON")
-    ap.add_argument("--csv-output", default=DEFAULT_CSV_OUTPUT, help="Output final crossings CSV")
-    ap.add_argument("--survey-csv", default=DEFAULT_SURVEY_CSV, help="Where to save the raw SAM3 measurement data")
-    ap.add_argument("--images-dir", default=DEFAULT_IMAGES_DIR, help="Directory for the per-crossing QA images")
-    ap.add_argument("--width-geometry-output", default=DEFAULT_WIDTH_GEOMETRY_OUTPUT,
-                     help="Output GeoJSON: one layer with both the measured width lines and the along-track span lines, drawn to scale")
-    return ap.parse_args()
+    ap.add_argument("-o", "--output", default=None,
+                     help="Output final crossings GeoJSON. Default: output/<region>_crossings_final_gl.geojson")
+    ap.add_argument("--csv-output", default=None, help="Output final crossings CSV")
+    ap.add_argument("--survey-csv", default=None, help="Where to save the raw SAM3 measurement data")
+    ap.add_argument("--images-dir", default=None, help="Directory for the per-crossing QA images")
+    ap.add_argument("--width-geometry-output", default=None,
+                     help="Output GeoJSON: the measured width lines, drawn to scale (span lines are added by structure_decide.py)")
+    args = ap.parse_args()
+    fill_region_paths(args, REGION_PATH_ARGS)
+    return args
 
 
 def main() -> None:
     args = parse_args()
 
-    if not Path(args.crossings).exists():
-        raise SystemExit(f"{args.crossings} not found - run src/crossing_identify.py first")
-    cross = gpd.read_file(args.crossings)
+    crossings_path = latest(args.crossings)
+    if not crossings_path.exists():
+        raise SystemExit(f"{args.crossings} not found - run src/crossing_identify.py first "
+                         f"(or pass --region / --crossings for the region you ran it for)")
+    print(f"crossings: {crossings_path}")
+    cross = gpd.read_file(crossings_path)
     centroid = cross.geometry.union_all().centroid
     epsg = args.epsg or get_utm_epsg(centroid.x, centroid.y)
 
@@ -319,28 +302,39 @@ def main() -> None:
         print(f"using {args.measured_csv} directly - skipping SAM3")
         survey = pd.read_csv(args.measured_csv)
     else:
-        if not Path(args.roads).exists():
+        roads_path = latest(args.roads)
+        if not roads_path.exists():
             raise SystemExit(f"{args.roads} not found - run src/crossing_identify.py first")
-        roads = gpd.read_file(args.roads)
+        print(f"roads: {roads_path}")
+        roads = gpd.read_file(roads_path)
         survey = measure_all(cross, roads, epsg, args)
         write_csv(survey, Path(args.survey_csv))
         n_ok = survey["measured_width_m"].notna().sum()
         print(f"\nwrote {args.survey_csv} ({n_ok}/{len(survey)} measured)")
         print(f"QA crops in {args.images_dir}/")
 
-    survey = survey[survey["measured_width_m"].notna()]
-    for col in ("measured_by", "notes", "width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"):
+    survey = survey[survey["measured_width_m"].notna()].copy()
+    edge_cols = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y",
+                 "ext_p1_x", "ext_p1_y", "ext_p2_x", "ext_p2_y"]
+    # n_roads/road_layout_m/total/cw*/median: the combined-road reading (width_core.combine_roads) -
+    # cw1/median/cw2 are also fillable by hand in a --measured-csv recheck, for a divided road the
+    # imagery pass couldn't split
+    width_cols = ["measured_width_m", "measured_by", "notes", "width_iqr_m", "n_transects",
+                  "n_roads", "road_layout_m", "total_width_m",
+                  "cw1_width_m", "median_width_m", "cw2_width_m"]
+    for col in width_cols + edge_cols:
         if col not in survey.columns:
             survey[col] = None
-    edge_cols = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]
-    survey = survey[["crossing_id", "measured_width_m", "measured_by", "notes"] + edge_cols]
+    survey = survey[["crossing_id"] + width_cols + edge_cols]
     print(f"\n{len(survey)} measured row(s) to merge")
 
-    cross = cross.drop(columns=["measured_width_m", "measured_by", "notes"] + edge_cols, errors="ignore")
+    cross = cross.drop(columns=width_cols + edge_cols, errors="ignore")
     cross = cross.merge(survey, on="crossing_id", how="left")
-    cross[["design_width_m", "width_source", "span_m"]] = cross.apply(resolve_width, axis=1, result_type="expand")
+    cross[["design_width_m", "width_source"]] = cross.apply(resolve_width, axis=1, result_type="expand")
+    cross["span_m"] = None  # a span from an earlier run no longer matches this width - structure_decide.py sets it
 
-    write_geojson(cross.drop(columns=edge_cols), Path(args.output))
+    # edge coordinates stay in the GeoJSON too - structure_decide.py redraws the width lines from them
+    write_geojson(cross, Path(args.output))
     write_csv(cross.drop(columns="geometry"), Path(args.csv_output))
     print(f"\nwrote {args.output}")
     print(f"wrote {args.csv_output}")
@@ -348,7 +342,9 @@ def main() -> None:
     still_missing = cross[cross["width_source"].str.startswith("needs field/imagery survey")]
     print(f"\n{len(still_missing)} crossing(s) still have no usable width at all - keep surveying.")
 
-    write_width_geometry(cross, epsg, args)
+    write_width_geometry(cross, epsg, str(latest(args.alignment)), args.width_geometry_output)
+    print(f"\nBox/bridge call, box size and span along track - run next:\n"
+          f"  python src/structure_decide.py --region {args.region}")
 
 
 if __name__ == "__main__":
