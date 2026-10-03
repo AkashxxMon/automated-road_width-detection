@@ -171,6 +171,9 @@ def prepare_alignment(args) -> gpd.GeoDataFrame:
 _NIC_REF_COLS = ["NH_no", "road_code_3", "Road_code_1", "Road_Code", "road_type_1", "CLASS_2"]
 _NIC_CLASS_TEXT_COLS = ["Class", "class_1", "CLASS_2", "road_type_1"]
 _NIC_NAME_COLS = ["Name", "name_1", "road_name", "NAME_2"]
+# surface: most state layers fill one of these with "Metalled (Road)" / "Unmetalled (Road)";
+# Gujarat, Odisha, Rajasthan, Haryana, Punjab, Assam, Delhi don't record it at all
+_NIC_SURFACE_COLS = ["Type", "type_2", "TYPE_1", "Road_type", "ROADTYPE"]
 _NIC_RAW_HIGHWAY_COLS = ["type_2"]  # already OSM-vocabulary in some source states' rows
 _NIC_REF_PATTERN = re.compile(r"\b(NH|SH|MDR|ODR)\b", re.IGNORECASE)
 
@@ -221,6 +224,19 @@ def _nic_highway(row: pd.Series) -> str | None:
     return None
 
 
+def _nic_surface(row: pd.Series) -> str | None:
+    """'paved' (metalled), 'unpaved' (unmetalled) or None (not recorded)."""
+    for col in _NIC_SURFACE_COLS:
+        v = row.get(col)
+        if isinstance(v, str) and v.strip():
+            v = v.strip().lower()
+            if v.startswith(("unmetal", "kutcha", "kachcha", "earthen", "unpaved")):
+                return "unpaved"
+            if v.startswith(("metal", "pucca", "paved", "bt", "black top", "cc", "concrete")):
+                return "paved"
+    return None
+
+
 def _nic_name(row: pd.Series) -> str | None:
     for col in _NIC_NAME_COLS:
         v = row.get(col)
@@ -266,7 +282,8 @@ def load_road_network(corridor_wgs84, args) -> gpd.GeoDataFrame:
     roads["highway"] = roads.apply(_nic_highway, axis=1)
     roads["ref"] = roads.apply(_nic_ref, axis=1)
     roads["name"] = roads.apply(_nic_name, axis=1)
-    roads = roads[["highway", "ref", "name", "geometry"]]
+    roads["surface"] = roads.apply(_nic_surface, axis=1)
+    roads = roads[["highway", "ref", "name", "surface", "geometry"]]
     print(f"roads: {len(roads)} edge(s)")
     return roads
 
@@ -329,6 +346,7 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
                 "ref": road.get("ref"),
                 "name": road.get("name"),
                 "lanes": road.get("lanes"),
+                "surface": road.get("surface"),
                 "irc_class": classify(road.get("highway"), road.get("ref")),
                 "geometry": pt,
             })

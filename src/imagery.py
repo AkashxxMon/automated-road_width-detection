@@ -15,6 +15,7 @@ so treat widths measured from it as a first-pass automated estimate.
 from __future__ import annotations
 
 import math
+import threading
 
 import numpy as np
 import requests
@@ -27,6 +28,15 @@ PLACEHOLDER_MAX_BYTES = 6000  # "Map data not yet available" tiles are small fla
 DEFAULT_ZOOM_CANDIDATES = (19, 18, 17, 16)
 
 _tile_cache: dict[tuple[int, int, int], "Image.Image | None"] = {}
+_TILE_CACHE_MAX = 600   # decoded tiles are ~200 KB each; neighbouring crossings share tiles, far ones don't
+_cache_lock = threading.Lock()
+_local = threading.local()  # one requests.Session per thread: connection reuse, no cross-thread sharing
+
+
+def _session() -> requests.Session:
+    if not hasattr(_local, "s"):
+        _local.s = requests.Session()
+    return _local.s
 
 
 def mpp_at(lat_deg: float, zoom: int) -> float:
@@ -36,12 +46,13 @@ def mpp_at(lat_deg: float, zoom: int) -> float:
 
 def _fetch_tile(z: int, x: int, y: int, retries: int = 3) -> "Image.Image | None":
     key = (z, x, y)
-    if key in _tile_cache:
-        return _tile_cache[key]
+    with _cache_lock:
+        if key in _tile_cache:
+            return _tile_cache[key]
     img = None
     for attempt in range(retries):
         try:
-            r = requests.get(TILE_URL.format(z=z, x=x, y=y), timeout=20)
+            r = _session().get(TILE_URL.format(z=z, x=x, y=y), timeout=20)
             if r.status_code == 200 and len(r.content) > PLACEHOLDER_MAX_BYTES:
                 from io import BytesIO
                 img = Image.open(BytesIO(r.content)).convert("RGB")
@@ -52,7 +63,11 @@ def _fetch_tile(z: int, x: int, y: int, retries: int = 3) -> "Image.Image | None
             pass  # transient network error - retry, and don't cache the failure
     else:
         return None  # exhausted retries on a real (non-placeholder) failure - leave uncached so a later call can retry
-    _tile_cache[key] = img
+    with _cache_lock:
+        if len(_tile_cache) >= _TILE_CACHE_MAX:
+            for old in list(_tile_cache)[:_TILE_CACHE_MAX // 4]:  # oldest first (dict keeps insertion order)
+                del _tile_cache[old]
+        _tile_cache[key] = img
     return img
 
 

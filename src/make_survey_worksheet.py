@@ -43,7 +43,11 @@ def main() -> None:
     else:
         raise SystemExit("No crossings file found - run src/crossing_identify.py first")
 
-    cross = cross[(cross["decision"] != "no_crossing") & cross["irc_class"].isin(MAJOR_CLASSES)].copy()
+    kept = cross["irc_class"].isin(MAJOR_CLASSES)
+    for col in ("surface", "surface_sam3"):  # a paved minor road is kept too (structure_decide.py S1)
+        if col in cross.columns:
+            kept |= cross[col].eq("paved")
+    cross = cross[(cross["decision"] != "no_crossing") & kept].copy()
     needs_recheck = cross["width_source"].str.contains("SUSPECT|needs field", regex=True, na=False)
     cross = cross[needs_recheck].sort_values(["align_name", "chainage_m"])
 

@@ -329,9 +329,9 @@ def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str
     road_meets_track) so they cross each other at the structure:
       - "width": the SAM3 measurement across the road, from the two road-edge
         pixels the transect walk found - moved along the road from the
-        transect it was measured on (shifted_along_road_m) - only present
-        where a live SAM3 measurement ran (not for a --measured-csv merge,
-        which has no pixel geometry).
+        transect it was measured on - only present where a live SAM3
+        measurement ran (not for a --measured-csv merge, which has no pixel
+        geometry).
       - "extent": outer edge to outer edge of every road within 20 m of it
         (a divided road's other carriageway, a service road), where the
         imagery found any.
@@ -341,10 +341,12 @@ def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str
         span_centre_chainage_m, not just a straight tangent segment, so it
         stays accurate on curves.
     A line whose road doesn't meet the track stays where it was measured.
+    Every line carries its own length_m (the width, extent or span it shows)
+    and a few of its crossing's structure attributes, for styling/labelling.
     """
-    props = ["crossing_id", "align_name", "chainage_m", "irc_class", "angle_deg",
-              "measured_width_m", "total_width_m", "road_layout_m", "design_width_m", "opening_width_m", "span_m",
-              "span_centre_chainage_m", "width_source", "decision", "structure_type", "box_size", "merged_ids"]
+    # only what a map reader needs - the full record is in the register the layer was drawn from
+    props = ["crossing_id", "project_ch", "irc_class", "angle_deg", "structure_type", "box_size",
+             "opening_width_m", "span_m", "road_lowering_m", "structure_flags"]
     props = [c for c in props if c in cross.columns]
     tracks = load_tracks(alignment_path, epsg) if "align_id" in cross.columns else {}
     if not tracks:
@@ -361,8 +363,8 @@ def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str
             hit = road_meets_track(p1, p2, track) if track is not None else None
             dx, dy = (hit[0] - (p1[0] + p2[0]) / 2, hit[1] - (p1[1] + p2[1]) / 2) if hit else (0.0, 0.0)
             geom = LineString([(p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)])
-            width_rows.append({**{c: r[c] for c in props}, "kind": kind,
-                               "shifted_along_road_m": round(math.hypot(dx, dy), 1), "geometry": geom})
+            width_rows.append({"crossing_id": r["crossing_id"], "kind": kind, "length_m": round(geom.length, 2),
+                               **{c: r[c] for c in props if c != "crossing_id"}, "geometry": geom})
 
     span_rows = []
     mismatched = 0
@@ -378,7 +380,9 @@ def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str
             end = min(centre + half, line.length)
             if end <= start:
                 continue
-            span_rows.append({**{c: r[c] for c in props}, "kind": "span", "geometry": substring(line, start, end)})
+            geom = substring(line, start, end)
+            span_rows.append({"crossing_id": r["crossing_id"], "kind": "span", "length_m": round(geom.length, 2),
+                              **{c: r[c] for c in props if c != "crossing_id"}, "geometry": geom})
     if mismatched:
         print(f"\n  [warn] {mismatched} span line(s) skipped - their align_id/align_name isn't in {alignment_path} "
               f"(alignment file from a different crossing_identify.py run? pass the matching --alignment)")
