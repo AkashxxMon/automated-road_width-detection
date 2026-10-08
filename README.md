@@ -131,41 +131,21 @@ Then, for each structure (the first rule that matches sets `structure_type`; fla
 |---|---|---|
 | S0 | no structure needed (R2) | `NONE` |
 | S1 | minor road — village road, street, cart track, path — that is **unpaved** | `NIL_REROUTE`: re-routed to the nearest structure. Flag `CLASS_CHECK` if it looks too wide for its class |
-| | minor road that is **paved** | kept (`MINOR_PAVED`) and sized by S2–S7 like a major road, at 4.0 m clearance (`--minor-clearance-m`) |
+| | minor road that is **paved** | kept (`MINOR_PAVED`) and sized by S2–S6 like a major road, at 4.0 m clearance (`--minor-clearance-m`) |
 | | minor road whose surface is **unknown** | kept too, flagged `SURFACE_UNKNOWN` (`--unknown-surface reroute` to re-route instead) |
 
-Surface (`road_surface`, `surface_source`): SAM3's verdict from the imagery when it's confident, else the NIC road data's metalled/unmetalled flag, else unknown. A register made before surface was recorded keeps the old behaviour (every minor road re-routed).
+Surface (`road_surface`, `surface_source`): **paved if either source says paved** — SAM3's imagery verdict or the NIC road data's metalled flag — because a paved road must never be re-routed; unpaved only if neither says paved; unknown if neither says anything. A register made before surface was recorded keeps the old behaviour (every minor road re-routed).
 | S2 | major road (EXP/NH/SH/MDR/ODR — every NIC "District Road" counts) with no width | `PENDING_SURVEY` |
 | S3 | crossing angle below 45° (same as R7) | flag `HIGH_SKEW`; `span_m` stays empty whatever the structure |
 | S4 | more than one road (divided per R5, or 2+ roads in the combined layout) | `DUAL_DESIGNER_DECISION`: one box over the whole width, a split twin-cell box (one cell per carriageway, wall in the median) and a bridge are all worked out; `structure_suggested` is the first that fits |
 | S5 | one road, opening fits a standard box | `BOX`, smallest standard size — square to the road, so no span |
 | S6 | one road, opening wider than any standard box | `BRIDGE`, `span_m = opening ÷ sin(crossing angle)` |
-| S7 | with the project's levels (applied last): the railway is on a viaduct / in a tunnel there | `UNDER_VIADUCT` / `OVER_TUNNEL` — no road structure at all |
-| | rail level − road level is short of clearance + deck depth | the road is lowered by the shortfall (`ROAD_LOWERED`, `road_lowering_m`), up to 1.5 m (`--max-road-lowering-m`); beyond that → `ROB`, the road goes over the railway |
 
 - `opening_width_m` = combined width + 1 m buffer each side (`--edge-buffer-m`).
 - Box sizes come from `config/box_sizes.csv`, taken from the RDSO "DFC Loading" tables (single cell double track, 1–6 m spans; twin cell 4–6 m). A box's height is the smallest standard height clearing 5.5 m (`--clearance-m`, the organisation's major-road clearance), so in practice 6.0 m. The largest standard box is 6 m, so any road with an opening over 6 m gets a bridge.
 - Other flags: `SUSPECT_WIDTH`, `BORDERLINE` (opening within 0.5 m of the 6 m box limit), `CORRIDOR_MERGED`, `LAYOUT_APPROX` (some merged crossing has no imagery road edges), `DUAL_MISMATCH` (road data and imagery disagree on divided), `CONNECTIVITY_REVIEW` (R4), `NEAR_JUNCTION` (R6), `NEARBY_CROSSING` (R8, not already merged), `ROAD_OFFSET` (the road in the imagery meets the track more than 10 m from where the road data's line does — check the QA crop).
-- `NO_LEVELS` flags a major road with no level point at its crossing (S7 couldn't run).
-- The codes and standards behind these rules are listed in `codes/SOURCES.md`.
 
-**Project inputs** (all optional — a missing file just leaves its columns empty; see `input/ewdfc/SOURCES.md` for where the EWDFC ones came from and `src/project_inputs.py` for the columns, so another project can supply its own):
-
-| Input (`structure_decide.py` argument) | Default | Adds |
-|---|---|---|
-| rail + ground levels every 5 m (`--levels`) | `input/ewdfc/levels_5m.parquet` | `rail_level_m`, `ground_level_m`, `headroom_m` (rail − ground), `level_tag` (Viaduct/Tunnel) — drives S7 |
-| project chainage labels (`--chainage-points`) | `input/ewdfc/chainage_points.gpkg` | `project_ch_m`, `project_ch` (`1607+276`: km 0 at New Vedchha/Ancheli; the Rajkharsawan–Andal spur has its own) |
-| the designers' own ROB/RUB list (`--reference-structures`) | `input/ewdfc/reference_structures.csv` | `ref_bridge_no`, `ref_kind`, `ref_config`, `ref_dist_m` — and a printed comparison of our call against theirs, plus how many of their structures have no crossing of ours nearby |
-
-S7's thresholds come from the designers' own decisions: where they built an ROB the rail is at most ~2 m above the road (91–95% of cases), above ~3 m it's an RUB (97–100%), and RUB roads were lowered up to ~1.5 m (95th percentile). Deck depth (rail to soffit) is 0.6 m for a box (`--box-deck-depth-m`) and 1.0 m for a bridge (`--bridge-deck-depth-m`, through-type girders); the levels only cover the BD sections, not PB-Sec-2..6.
-
-Output: the structure register (`output/<region>_structures.geojson` + CSV, every attribute) and a geometry layer drawn to scale (`output/<region>_structure_geometry.geojson`), with a `kind` per line:
-
-- `width` — the measured road width, across the road (so it sits at the crossing angle to the track);
-- `extent` — outer edge to outer edge when several roads were combined;
-- `span` — the structure length, along the track (none for a box, an ROB, or a high-skew crossing).
-
-All of them are drawn where the road in the imagery meets the track, so for each crossing they cross each other at one point. The layer keeps only what a map needs: `crossing_id`, `kind`, `length_m` (the width, extent or span that line shows), `project_ch`, `irc_class`, `angle_deg`, `structure_type`, `box_size`, `opening_width_m`, `span_m`, `road_lowering_m`, `structure_flags` — everything else is in the register. Style or filter it by `kind` in QGIS.
+Output: the structure register (`output/<region>_structures.geojson` + CSV, every attribute) and a geometry layer (`output/<region>_structure_geometry.geojson`) with one line per crossing: the measured road width, drawn to scale across the road where the road in the imagery meets the track (so it sits at the crossing angle to the track). No span line is drawn: the span is the `span_m` attribute. The layer keeps only what a map needs, copied as they are from the register: `crossing_id`, `measured_width_m`, `Assumed_irc_class`, `road_surface` (paved/unpaved/unknown), `surface_source` (imagery/road data), `skew_angle_deg` (90 − crossing angle, 0 = square), `Assumed_structure_type`, `Assumed_box_size`, `Assumed_opening_width_m`, `Assumed_span_m`, `structure_flags` — everything else is in the register (which also carries the `Assumed_` columns). "Assumed" because they come from imagery and rules, not a survey.
 
 ### The review map
 

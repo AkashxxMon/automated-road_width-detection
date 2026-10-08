@@ -32,13 +32,13 @@ VALIDATION = "output/gujarat_validation.geojson"  # optional - written by src/va
 
 DECISION_COLOR = {"crossing": "#EA4335", "review": "#F9AB00", "no_crossing": "#80868B"}
 DECISION_LABEL = {"crossing": "Crossing required", "review": "Review", "no_crossing": "No crossing"}
-STRUCTURE_COLOR = {"ROB": "#1A73E8", "BRIDGE": "#EA4335", "BOX": "#1E8E3E", "DUAL_DESIGNER_DECISION": "#8E24AA",
-                   "PENDING_SURVEY": "#F9AB00", "UNDER_VIADUCT": "#00ACC1", "OVER_TUNNEL": "#00ACC1",
+STRUCTURE_COLOR = {"BRIDGE": "#EA4335", "BOX": "#1E8E3E", "DUAL_DESIGNER_DECISION": "#8E24AA",
+                   "PENDING_SURVEY": "#F9AB00",
                    "NIL_REROUTE": "#9AA0A6", "MERGED": "#BDC1C6", "NONE": "#5F6368"}
-STRUCTURE_LABEL = {"ROB": "ROB - road over the railway", "BRIDGE": "Bridge (RUB)", "BOX": "Box culvert (RUB)",
+STRUCTURE_LABEL = {"BRIDGE": "Bridge (RUB)", "BOX": "Box culvert (RUB)",
                    "DUAL_DESIGNER_DECISION": "Divided road - designer decides",
-                   "PENDING_SURVEY": "Major road - width pending", "UNDER_VIADUCT": "Under a DFC viaduct - no structure",
-                   "OVER_TUNNEL": "Over a DFC tunnel - no structure", "NIL_REROUTE": "Minor road - re-route",
+                   "PENDING_SURVEY": "Major road - width pending",
+                   "NIL_REROUTE": "Minor road - re-route",
                    "MERGED": "Merged into another crossing's structure", "NONE": "No structure"}
 
 GOOGLE_SAT_URL = "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
@@ -74,14 +74,6 @@ def popup_html(row, crops_dir: str) -> str:
             f" &middot; <b>Split box:</b> {fmt(row.get('box_split_size'))}<br>"
             f"<b>Flags:</b> {fmt(row.get('structure_flags'))}<br>"
         )
-        if pd.notna(row.get("project_ch")):
-            structure_bits += f"<b>Project chainage:</b> {row['project_ch']}<br>"
-        if pd.notna(row.get("headroom_m")):
-            structure_bits += (f"<b>Rail above ground:</b> {row['headroom_m']} m"
-                               f" &middot; <b>Road lowered:</b> {fmt(row.get('road_lowering_m'), ' m')}<br>")
-        if pd.notna(row.get("ref_kind")):
-            structure_bits += (f"<b>Designers' structure:</b> {row['ref_bridge_no']} {row['ref_kind']} "
-                               f"{fmt(row.get('ref_config'))} ({row['ref_dist_m']} m away)<br>")
 
     return f"""
     <div style="font-family:sans-serif;font-size:13px;min-width:240px">

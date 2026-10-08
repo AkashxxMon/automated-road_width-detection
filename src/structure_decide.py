@@ -19,9 +19,11 @@ Then, per structure (the first match sets structure_type; flags add up and
 never change it):
   S0  decision = no_crossing (R2)                         -> NONE
   S1  minor road (irc_class not in --major-classes) that  -> NIL_REROUTE, no structure
-      is unpaved. Surface: SAM3's verdict from the imagery
-      when clear (surface_sam3), else the road data's
-      metalled/unmetalled (surface), else unknown.
+      is unpaved. Surface: paved if EITHER SAM3's imagery
+      verdict (surface_sam3) or the road data's metalled
+      flag (surface) says paved - a paved road can't be
+      re-routed; else unpaved if either says so; else
+      unknown.
       A paved minor road is kept (road_category
       MINOR_PAVED), an unknown one too (flag
       SURFACE_UNKNOWN; --unknown-surface reroute to drop
@@ -36,22 +38,10 @@ never change it):
                                                              structure_suggested = first that fits
   S5  one road, opening fits a standard box               -> BOX, square to the road (no span)
   S6  one road, opening wider than any box                -> BRIDGE, span_m = opening / sin(angle)
-  S7  with the project's levels (--levels), last:
-        railway on a viaduct / in a tunnel there          -> UNDER_VIADUCT / OVER_TUNNEL, no structure
-        rail level - road level short of clearance + deck -> road lowered by the shortfall (flag
-                                                             ROAD_LOWERED, road_lowering_m), up to
-                                                             --max-road-lowering-m; beyond that -> ROB
-        no level point at the crossing                    -> flag NO_LEVELS, call unchanged
 
 opening_width_m is the combined width plus --edge-buffer-m on each side.
 Every box is the smallest standard size (--box-sizes) whose span covers the
 opening and whose height clears --clearance-m.
-
-Project inputs (all optional, see input/ewdfc/SOURCES.md and project_inputs.py)
-add rail_level_m / ground_level_m / headroom_m / level_tag (--levels),
-project_ch_m / project_ch (--chainage-points) and, from the designers' own
-ROB/RUB list (--reference-structures), ref_bridge_no / ref_kind / ref_config /
-ref_dist_m - printed against our call at the end.
 
 Usage:
     python src/structure_decide.py
@@ -71,7 +61,6 @@ import pandas as pd
 
 from geo_utils import fill_region_paths, get_utm_epsg, latest, write_csv, write_geojson
 from irc_classify import MAJOR_CLASSES
-from project_inputs import attach_levels, attach_project_chainage, attach_reference, reference_coverage
 from width_core import (MAX_ROAD_GAP_M, MIN_ROAD_GAP_M, load_tracks, road_layout_text, road_meets_track, track_for,
                         write_width_geometry)
 
@@ -80,9 +69,6 @@ from width_core import (MAX_ROAD_GAP_M, MIN_ROAD_GAP_M, load_tracks, road_layout
 REGION_PATH_ARGS = {"register": "final", "alignment": "alignment", "output": "structures",
                     "csv_output": "structures_csv", "geometry_output": "structure_geometry"}
 DEFAULT_BOX_SIZES = "config/box_sizes.csv"
-DEFAULT_LEVELS = "input/ewdfc/levels_5m.parquet"
-DEFAULT_CHAINAGE_POINTS = "input/ewdfc/chainage_points.gpkg"
-DEFAULT_REFERENCE_STRUCTURES = "input/ewdfc/reference_structures.csv"
 
 DEFAULT_WALL_M = 0.5  # twin-box intermediate wall, if the box table doesn't give one (RDSO DFC twin: 0.45-0.5 m)
 CLASS_RANK = {c: i for i, c in enumerate(("EXP", "NH", "SH", "MDR", "ODR", "VR", "TRK", "PTH"))}
@@ -91,7 +77,7 @@ STRUCTURE_COLUMNS = [
     "road_category", "road_surface", "surface_source", "skew_angle_deg", "merged_into", "merged_ids", "n_roads", "combined_layout_m",
     "combined_width_m", "opening_width_m", "structure_type", "structure_suggested", "structure_rule",
     "box_size", "box_split_size", "span_m", "span_each_m", "span_centre_chainage_m", "clearance_m",
-    "road_lowering_m", "structure_flags", "structure_reason",
+    "structure_flags", "structure_reason",
 ]
 
 
@@ -264,15 +250,17 @@ def corridor_groups(cross: gpd.GeoDataFrame, args) -> list[list]:
 # ---------------------------------------------------------------- S0-S6
 
 def road_surface(row) -> tuple[str, str]:
-    """(paved / unpaved / unknown, where from): SAM3's verdict from the
-    imagery when it's clear, else what the road data records - on 60 checked
-    crossings the imagery was right more often than NIC's metalled flag."""
-    s3 = row.get("surface_sam3")
-    if s3 in ("paved", "unpaved"):
-        return s3, "imagery"
-    nic = row.get("surface")
-    if nic in ("paved", "unpaved"):
-        return nic, "road data"
+    """(paved / unpaved / unknown, where from). A paved road can't be
+    re-routed, so evidence of paved from EITHER source wins: SAM3's imagery
+    verdict or the road data's metalled flag (when both say paved the source
+    is 'imagery+road data'). Otherwise unpaved if either says so, else unknown."""
+    s3, nic = row.get("surface_sam3"), row.get("surface")
+    img = s3 if s3 in ("paved", "unpaved") else None
+    dat = nic if nic in ("paved", "unpaved") else None
+    if "paved" in (img, dat):
+        return "paved", " + ".join(n for n, v in (("imagery", img), ("road data", dat)) if v == "paved")
+    if img or dat:
+        return "unpaved", " + ".join(n for n, v in (("imagery", img), ("road data", dat)) if v == "unpaved")
     return "unknown", "none"
 
 
@@ -425,61 +413,8 @@ def road_centre_chainage(row, tracks: dict) -> float | None:
     return hit[2] if hit else None
 
 
-def apply_levels(out: dict, lv, args) -> dict:
-    """S7, from the project's rail and ground levels at the crossing. The
-    railway on a viaduct or in a tunnel there needs no road structure at all.
-    Otherwise an RUB needs clearance + deck depth between rail level and the
-    road, so the road is lowered by any shortfall - up to
-    --max-road-lowering-m, beyond which the road goes over the railway
-    instead (ROB). This mirrors the designers' own list: ROBs where the rail
-    is at most ~2 m above ground, RUBs (roads lowered up to ~1.5 m) above ~3 m."""
-    st = out["structure_type"]
-    if st in ("NONE", "MERGED"):
-        return out
-    flags = [f for f in (out["structure_flags"] or "").split(";") if f]
-    tag = lv.get("level_tag")
-    if isinstance(tag, str) and tag:
-        for c in ("box_size", "box_split_size", "span_m", "span_each_m", "structure_suggested", "clearance_m"):
-            out[c] = None
-        where = "on a viaduct" if tag == "Viaduct" else "in a tunnel"
-        out.update(structure_type="UNDER_VIADUCT" if tag == "Viaduct" else "OVER_TUNNEL", structure_rule="S7",
-                   structure_reason=f"the railway is {where} here - the road is not affected, no separate structure")
-        return out
-    if out["road_category"] == "MINOR" or st not in ("BOX", "BRIDGE", "DUAL_DESIGNER_DECISION", "PENDING_SURVEY"):
-        return out
-    headroom = _num(lv.get("headroom_m"))
-    if headroom is None:
-        out["structure_flags"] = ";".join(flags + ["NO_LEVELS"])
-        return out
-    kind = out["structure_suggested"] if st == "DUAL_DESIGNER_DECISION" else st
-    deck = args.bridge_deck_depth_m if kind == "BRIDGE" else args.box_deck_depth_m
-    clearance = out["clearance_m"] if out["clearance_m"] is not None else args.clearance_m
-    need = clearance + deck
-    lowering = max(0.0, need - headroom)
-    if lowering > args.max_road_lowering_m:
-        under = out["structure_reason"]
-        for c in ("box_size", "box_split_size", "span_m", "span_each_m", "structure_suggested", "clearance_m"):
-            out[c] = None
-        out.update(structure_type="ROB", structure_rule="S7",
-                   structure_reason=f"rail level is only {headroom:.2f} m above the road; an RUB needs {need:.2f} m "
-                                    f"({clearance:g} m clearance + {deck:g} m deck), i.e. lowering the road "
-                                    f"{lowering:.2f} m - more than {args.max_road_lowering_m:g} m, so the road goes "
-                                    f"over the railway (ROB). Under-railway option was: {under}")
-    elif lowering > 0:
-        out["road_lowering_m"] = round(lowering, 2)
-        flags.append("ROAD_LOWERED")
-        out["structure_reason"] += (f"; road lowered {lowering:.2f} m - rail level is {headroom:.2f} m above it, "
-                                    f"the {str(kind).lower().replace('_', ' ')} needs {need:.2f} m")
-    else:
-        out["road_lowering_m"] = 0.0
-    out["structure_flags"] = ";".join(flags) or None
-    return out
-
-
-def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, project: pd.DataFrame,
-               args) -> pd.DataFrame:
-    """Structure columns for every row of cross (in the metric CRS); project
-    holds the optional project data per row (levels etc., see project_inputs)."""
+def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, args) -> pd.DataFrame:
+    """Structure columns for every row of cross (in the metric CRS)."""
     decided = {}
     for _, r in cross[cross["decision"] == "no_crossing"].iterrows():
         decided[r.name] = decide(r, None, [r], boxes, args)
@@ -497,7 +432,7 @@ def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, proje
                         [f for f in (out["structure_flags"] or "").split(";") if f] + ["ROAD_OFFSET"])
                     out["structure_reason"] += (f"; the measured road meets the track {centre - rep['chainage_m']:+.1f} m "
                                                 f"from the road-data crossing point - check the QA crop")
-            decided[rep.name] = apply_levels(out, project.loc[rep.name], args)
+            decided[rep.name] = out
             continue
         sin_t = math.sin(math.radians(rep["angle_deg"]))
         t = _track_dir(members)
@@ -522,7 +457,7 @@ def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, proje
             out["structure_reason"] += ("; layout approximate - some crossings have no imagery road edges, "
                                         "so their width is centred on the crossing point")
         out["span_centre_chainage_m"] = round(centre, 1)
-        decided[rep.name] = apply_levels(out, project.loc[rep.name], args)
+        decided[rep.name] = out
         for m in members:
             if m.name == rep.name:
                 continue
@@ -565,22 +500,6 @@ def parse_args():
                      help="S1: a minor road whose surface neither the imagery nor the road data settles")
     ap.add_argument("--borderline-m", type=float, default=0.5,
                      help="Flag BORDERLINE when the opening is this close to the largest box span (or the transect IQR, if wider)")
-    ap.add_argument("--levels", default=DEFAULT_LEVELS,
-                     help="S7: rail and ground level points (lon, lat, rail_level_m, ground_level_m, tag). '' to skip")
-    ap.add_argument("--level-match-m", type=float, default=10.0,
-                     help="S7: use the nearest level point within this of the crossing")
-    ap.add_argument("--box-deck-depth-m", type=float, default=0.6,
-                     help="S7: rail level to box soffit (top slab etc.) - the designers' 4-5.5 m boxes show 0.5-0.6 m")
-    ap.add_argument("--bridge-deck-depth-m", type=float, default=1.0,
-                     help="S7: rail level to soffit for a bridge (through OWG ~0.5-1.0 m, PSC slab ~0.9 m, composite 1.6-2.6 m)")
-    ap.add_argument("--max-road-lowering-m", type=float, default=1.5,
-                     help="S7: lower the road at most this for an RUB, else ROB (DPR §7.4; designers' 95th percentile 1.54 m)")
-    ap.add_argument("--chainage-points", default=DEFAULT_CHAINAGE_POINTS,
-                     help="Project chainage labels on the alignment (points with ch_m). '' to skip")
-    ap.add_argument("--reference-structures", default=DEFAULT_REFERENCE_STRUCTURES,
-                     help="The designers' ROB/RUB list (lon, lat, ref_bridge_no, ref_kind, ref_config). '' to skip")
-    ap.add_argument("--ref-match-m", type=float, default=50.0,
-                     help="Match a crossing to the designers' structure within this distance")
     ap.add_argument("--road-offset-flag-m", type=float, default=10.0,
                      help="Flag ROAD_OFFSET when the measured road meets the track this far from the crossing point")
     ap.add_argument("--class-check-width-m", type=float, default=7.0,
@@ -589,7 +508,7 @@ def parse_args():
     ap.add_argument("-o", "--output", default=None, help="Output structure register GeoJSON. Default: output/<region>_structures.geojson")
     ap.add_argument("--csv-output", default=None, help="Output structure register CSV")
     ap.add_argument("--geometry-output", default=None,
-                     help="Output GeoJSON: measured width/extent lines plus along-track span lines, drawn to scale")
+                     help="Output GeoJSON: measured road width lines (and combined extent where several roads), drawn to scale")
     args = ap.parse_args()
     args.major_classes = {c.strip().upper() for c in args.major_classes.split(",") if c.strip()}
     fill_region_paths(args, REGION_PATH_ARGS)
@@ -617,13 +536,12 @@ def main() -> None:
 
     cross_utm = cross.to_crs(epsg)
     tracks = load_tracks(args.alignment, epsg)
-    print("project inputs:")
-    project = pd.concat([attach_levels(cross_utm, args.levels, args.level_match_m),
-                         attach_project_chainage(cross_utm, tracks, args.chainage_points),
-                         attach_reference(cross_utm, args.reference_structures, args.ref_match_m)], axis=1)
-    decided = decide_all(cross_utm, boxes, tracks, project, args)
-    cross = cross.drop(columns=STRUCTURE_COLUMNS + list(project.columns), errors="ignore")
-    cross = gpd.GeoDataFrame(pd.concat([cross, project, decided], axis=1), geometry="geometry", crs=cross.crs)
+    decided = decide_all(cross_utm, boxes, tracks, args)
+    cross = cross.drop(columns=STRUCTURE_COLUMNS, errors="ignore")
+    cross = gpd.GeoDataFrame(pd.concat([cross, decided], axis=1), geometry="geometry", crs=cross.crs)
+    # the same values under "Assumed_" names (imagery and rules, not a survey) - the map layer copies these
+    for col in ("irc_class", "structure_type", "box_size", "opening_width_m", "span_m"):
+        cross["Assumed_" + col] = cross[col]
 
     write_geojson(cross, Path(args.output))
     write_csv(cross.drop(columns="geometry"), Path(args.csv_output))
@@ -650,18 +568,6 @@ def main() -> None:
         print("\nFlags (major roads, plus CLASS_CHECK on minor ones):")
         print(flags.to_string())
 
-    if cross["ref_kind"].notna().any():
-        under = {"BOX": "RUB", "BRIDGE": "RUB", "DUAL_DESIGNER_DECISION": "RUB"}
-        ours = cross["structure_type"].map(lambda t: under.get(t, t))
-        has_ref = cross["ref_kind"].notna()
-        print(f"\nAgainst the designers' list (crossings with one of their structures within {args.ref_match_m:g} m):")
-        print(pd.crosstab(ours[has_ref].rename("ours"), cross.loc[has_ref, "ref_kind"].rename("designers")).to_string())
-    coverage = reference_coverage(cross_utm, tracks, args.reference_structures, args.ref_match_m)
-    if coverage and coverage[0]:
-        n_ref, n_hit = coverage
-        print(f"\nDesigners' structures on this alignment: {n_ref}; {n_hit} have one of our crossings within "
-              f"{args.ref_match_m:g} m, {n_ref - n_hit} don't (a road missing from the road data, or a structure "
-              f"that isn't a road crossing)")
 
 
 if __name__ == "__main__":

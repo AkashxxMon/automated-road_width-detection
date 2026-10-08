@@ -403,7 +403,6 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
         partial_path.unlink()
     return df
 
-
 def resolve_width(row):
     """design_width_m comes from the SAM3 measurement alone - no IRC floor,
     no substitution. A SUSPECT measurement is still used, just labelled for
@@ -415,7 +414,6 @@ def resolve_width(row):
         return None, "needs field/imagery survey"
     source = "measured (SUSPECT - verify manually)" if "SUSPECT" in str(row["notes"]) else "measured"
     return row["measured_width_m"], source
-
 
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

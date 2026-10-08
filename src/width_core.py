@@ -323,78 +323,30 @@ def road_meets_track(p1: tuple[float, float], p2: tuple[float, float], track, re
     return best.x, best.y, track.project(best)
 
 
+# register columns copied as they are onto each width line (the rest of the record is in the register)
+LAYER_COLUMNS = ["crossing_id", "measured_width_m", "Assumed_irc_class", "road_surface", "surface_source",
+                 "skew_angle_deg", "Assumed_structure_type", "Assumed_box_size", "Assumed_opening_width_m", "Assumed_span_m", "structure_flags"]
+
+
 def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str, out_path: str) -> None:
-    """One combined layer, geometry drawn to scale, up to three kinds of line
-    per crossing, all drawn where the measured road meets the track (see
-    road_meets_track) so they cross each other at the structure:
-      - "width": the SAM3 measurement across the road, from the two road-edge
-        pixels the transect walk found - moved along the road from the
-        transect it was measured on - only present where a live SAM3
-        measurement ran (not for a --measured-csv merge, which has no pixel
-        geometry).
-      - "extent": outer edge to outer edge of every road within 20 m of it
-        (a divided road's other carriageway, a service road), where the
-        imagery found any.
-      - "span": the length of structure needed *along the railway track*
-        (span_m, set by structure_decide.py - absent for boxes and high-skew
-        crossings), drawn as the real alignment geometry either side of
-        span_centre_chainage_m, not just a straight tangent segment, so it
-        stays accurate on curves.
-    A line whose road doesn't meet the track stays where it was measured.
-    Every line carries its own length_m (the width, extent or span it shows)
-    and a few of its crossing's structure attributes, for styling/labelling.
-    """
-    # only what a map reader needs - the full record is in the register the layer was drawn from
-    props = ["crossing_id", "project_ch", "irc_class", "angle_deg", "structure_type", "box_size",
-             "opening_width_m", "span_m", "road_lowering_m", "structure_flags"]
-    props = [c for c in props if c in cross.columns]
-    tracks = load_tracks(alignment_path, epsg) if "align_id" in cross.columns else {}
-    if not tracks:
-        print(f"\n  [warn] {alignment_path} not found - width lines drawn where measured, no span lines")
-
-    width_rows = []
-    for kind, prefix in (("width", "width"), ("extent", "ext")):
-        cols = [f"{prefix}_p1_x", f"{prefix}_p1_y", f"{prefix}_p2_x", f"{prefix}_p2_y"]
-        if not set(cols) <= set(cross.columns):
-            continue
-        for _, r in cross[cross[cols].notna().all(axis=1)].iterrows():
-            p1, p2 = (r[cols[0]], r[cols[1]]), (r[cols[2]], r[cols[3]])
-            track = track_for(tracks, r)
-            hit = road_meets_track(p1, p2, track) if track is not None else None
-            dx, dy = (hit[0] - (p1[0] + p2[0]) / 2, hit[1] - (p1[1] + p2[1]) / 2) if hit else (0.0, 0.0)
-            geom = LineString([(p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)])
-            width_rows.append({"crossing_id": r["crossing_id"], "kind": kind, "length_m": round(geom.length, 2),
-                               **{c: r[c] for c in props if c != "crossing_id"}, "geometry": geom})
-
-    span_rows = []
-    mismatched = 0
-    if tracks and "span_m" in cross.columns:
-        for _, r in cross[cross["span_m"].notna() & cross["chainage_m"].notna()].iterrows():
-            line = track_for(tracks, r)
-            if line is None:
-                mismatched += 1
-                continue
-            half = r["span_m"] / 2.0
-            centre = r["span_centre_chainage_m"] if pd.notna(r.get("span_centre_chainage_m")) else r["chainage_m"]
-            start = max(centre - half, 0.0)
-            end = min(centre + half, line.length)
-            if end <= start:
-                continue
-            geom = substring(line, start, end)
-            span_rows.append({"crossing_id": r["crossing_id"], "kind": "span", "length_m": round(geom.length, 2),
-                              **{c: r[c] for c in props if c != "crossing_id"}, "geometry": geom})
-    if mismatched:
-        print(f"\n  [warn] {mismatched} span line(s) skipped - their align_id/align_name isn't in {alignment_path} "
-              f"(alignment file from a different crossing_identify.py run? pass the matching --alignment)")
-
-    if not width_rows and not span_rows:
-        print("\nno width/span geometry available (likely a --measured-csv run with no matching alignment) - "
-              "skipping width-geometry output")
+    """One line per crossing: the measured road width (the two road-edge pixels the
+    SAM3 transect walk found), drawn where the measured road meets the track. Only
+    crossings with a live SAM3 measurement have one. Attributes are LAYER_COLUMNS."""
+    edges = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]
+    if not set(edges) <= set(cross.columns):
+        print("\nno width geometry available (no pixel edges in this register) - skipping width-geometry output")
         return
-
-    combined = gpd.GeoDataFrame(width_rows + span_rows, geometry="geometry", crs=epsg).to_crs(4326)
-    write_geojson(combined, Path(out_path))
-    print(f"wrote {out_path} ({len(width_rows)} width/extent line(s), {len(span_rows)} span line(s))")
+    tracks = load_tracks(alignment_path, epsg) if "align_id" in cross.columns else {}
+    out = cross.loc[cross[edges].notna().all(axis=1), [c for c in LAYER_COLUMNS if c in cross.columns]].copy()
+    lines = []
+    for _, r in cross.loc[out.index].iterrows():
+        p1, p2 = (r[edges[0]], r[edges[1]]), (r[edges[2]], r[edges[3]])
+        track = track_for(tracks, r)
+        hit = road_meets_track(p1, p2, track) if track is not None else None
+        dx, dy = (hit[0] - (p1[0] + p2[0]) / 2, hit[1] - (p1[1] + p2[1]) / 2) if hit else (0.0, 0.0)
+        lines.append(LineString([(p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)]))
+    write_geojson(gpd.GeoDataFrame(out, geometry=lines, crs=epsg).to_crs(4326), Path(out_path))
+    print(f"wrote {out_path} ({len(out)} width line(s))")
 
 
 def write_csv(df: pd.DataFrame, path: Path) -> None:
