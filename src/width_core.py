@@ -328,16 +328,31 @@ LAYER_COLUMNS = ["crossing_id", "measured_width_m", "Assumed_irc_class", "road_s
                  "skew_angle_deg", "Assumed_structure_type", "Assumed_box_size", "Assumed_opening_width_m", "Assumed_span_m", "structure_flags"]
 
 
+WIDTH_EDGES = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]
+
+
+def in_layer(cross: pd.DataFrame) -> pd.Series:
+    """The crossings the width layer draws: a live SAM3 measurement, and - once
+    structure_decide.py has run - a structure decision of their own (not
+    MERGED into another crossing, not NONE)."""
+    if not set(WIDTH_EDGES) <= set(cross.columns):
+        return pd.Series(False, index=cross.index)
+    mask = cross[WIDTH_EDGES].notna().all(axis=1)
+    if "structure_type" in cross.columns:
+        mask &= ~cross["structure_type"].isin(["MERGED", "NONE"])
+    return mask
+
+
 def write_width_geometry(cross: gpd.GeoDataFrame, epsg: int, alignment_path: str, out_path: str) -> None:
-    """One line per crossing: the measured road width (the two road-edge pixels the
-    SAM3 transect walk found), drawn where the measured road meets the track. Only
-    crossings with a live SAM3 measurement have one. Attributes are LAYER_COLUMNS."""
-    edges = ["width_p1_x", "width_p1_y", "width_p2_x", "width_p2_y"]
+    """One line per crossing in in_layer(): the measured road width (the two road-edge
+    pixels the SAM3 transect walk found), drawn where the measured road meets the
+    track. Attributes are LAYER_COLUMNS."""
+    edges = WIDTH_EDGES
     if not set(edges) <= set(cross.columns):
         print("\nno width geometry available (no pixel edges in this register) - skipping width-geometry output")
         return
     tracks = load_tracks(alignment_path, epsg) if "align_id" in cross.columns else {}
-    out = cross.loc[cross[edges].notna().all(axis=1), [c for c in LAYER_COLUMNS if c in cross.columns]].copy()
+    out = cross.loc[in_layer(cross), [c for c in LAYER_COLUMNS if c in cross.columns]].copy()
     lines = []
     for _, r in cross.loc[out.index].iterrows():
         p1, p2 = (r[edges[0]], r[edges[1]]), (r[edges[2]], r[edges[3]])

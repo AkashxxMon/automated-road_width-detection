@@ -1,8 +1,9 @@
 """One command: clip a rail/road alignment to a boundary (optional), load
-the road network for a corridor around it from local NIC road data (no
-live API, no network dependency), and find every point where a road
-crosses the alignment - chainage, crossing angle, IRC road class, and the
-connectivity/dead-end rule (R1, R2, R4). The IRC class assigned here is used
+the road network for a corridor around it from local NIC road data, plus
+OpenStreetMap roads where NIC has none (Geofabrik extracts, downloaded once -
+see osm_roads.py), and find every point where a road crosses the alignment -
+chainage, crossing angle, IRC road class, the connectivity/dead-end rule (R1,
+R2, R4) and the identification filters (R10, R11, minor-road R4). The IRC class assigned here is used
 later only to flag an implausible measurement for review - design
 width/span come entirely from the SAM3 measurement (stage 6, a separate
 step - see measure_width_sam3.py), not from an IRC minimum.
@@ -37,7 +38,8 @@ from shapely.prepared import prep
 
 from geo_utils import (flatten_geom, get_utm_epsg, region_paths, region_prefix, region_slug, remember_region,
                        write_csv, write_geojson)
-from irc_classify import classify
+from irc_classify import MAJOR_CLASSES, classify
+from osm_roads import load_osm_roads
 from shapely.strtree import STRtree
 
 DEFAULT_ALIGNMENT = "input/DFCC_master_all_sections_Lines.geojson"
@@ -348,6 +350,7 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
                 "lanes": road.get("lanes"),
                 "surface": road.get("surface"),
                 "irc_class": classify(road.get("highway"), road.get("ref")),
+                "road_source": road.get("road_source", "nic"),
                 "geometry": pt,
             })
     return gpd.GeoDataFrame(rows, geometry="geometry", crs=align.crs)
@@ -499,6 +502,42 @@ def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, corridor,
     return cand
 
 
+def drop_known_crossings(extra: gpd.GeoDataFrame, known: gpd.GeoDataFrame, buffer_m: float,
+                         angle_deg: float) -> gpd.GeoDataFrame:
+    """OSM crossings that are a NIC road already found: within buffer_m of a
+    NIC crossing on the same alignment piece, at a similar crossing angle. NIC
+    lines can sit tens of metres off the real road, so a plain distance alone
+    would either keep duplicates or drop separate roads close together."""
+    keep = []
+    for _, r in extra.iterrows():
+        k = known[known["align_id"] == r["align_id"]]
+        near = k[(k.geometry.distance(r.geometry) <= buffer_m) & ((k["angle_deg"] - r["angle_deg"]).abs() <= angle_deg)]
+        keep.append(near.empty)
+    return extra[keep].reset_index(drop=True)
+
+
+def apply_identification_filters(cand: gpd.GeoDataFrame, args) -> gpd.GeoDataFrame:
+    """R10, R11 and the minor-road R4 drop: crossings that, scored against the
+    designers' bridges, are almost never one (angle under 15 deg 4%, tracks
+    19%, minor R4 17%) become no_crossing - kept in the register with the
+    reason, but not measured or given a structure."""
+    drop_classes = {c.strip().upper() for c in args.drop_classes.split(",") if c.strip()}
+    minor = ~cand["irc_class"].isin(MAJOR_CLASSES)
+    rules = [
+        (cand["angle_deg"] < args.min_angle_deg, "R10",
+         f"road runs along the alignment (crossing angle below {args.min_angle_deg:g} deg), not across it"),
+        (cand["irc_class"].isin(drop_classes), "R11", "road class excluded (--drop-classes)"),
+        ((cand["decision"] == "review") & minor & (args.minor_dead_end == "drop"), "R4",
+         "minor road that dead-ends near the alignment - dropped (--minor-dead-end drop)"),
+    ]
+    for mask, rule, reason in rules:
+        mask = mask & (cand["decision"] != "no_crossing")
+        cand.loc[mask, ["decision", "rule", "reason"]] = ["no_crossing", rule, reason]
+        if mask.any():
+            print(f"{rule}: {int(mask.sum())} crossing(s) -> no_crossing ({reason})")
+    return cand
+
+
 def flag_nearby_crossings(cand: gpd.GeoDataFrame, flag_m: float) -> gpd.GeoDataFrame:
     """R8: two crossings this close together are often the same physical road
     mapped as two separate/parallel segments (a duplicate trace, or a paved
@@ -574,6 +613,19 @@ def parse_args():
     ap.add_argument("--junction-flag-m", type=float, default=50.0, help="R6: flag a crossing within this of an existing junction")
     ap.add_argument("--skew-flag-deg", type=float, default=45.0, help="R7: flag a crossing angle below this")
     ap.add_argument("--nearby-crossing-flag-m", type=float, default=40.0, help="R8: flag another crossing on the same segment within this distance")
+    ap.add_argument("--osm", action=argparse.BooleanOptionalAction, default=True,
+                     help="Add OpenStreetMap roads (Geofabrik extracts, see osm_roads.py) where the NIC data has none")
+    ap.add_argument("--osm-buffer-m", type=float, default=60.0,
+                     help="An OSM crossing within this of a NIC crossing on the same alignment piece, at a similar "
+                          "angle (--osm-angle-deg), is the same road - the NIC one is kept")
+    ap.add_argument("--osm-angle-deg", type=float, default=20.0, help="See --osm-buffer-m")
+    ap.add_argument("--osm-max-age-days", type=float, default=30.0, help="Re-download an OSM extract older than this")
+    ap.add_argument("--min-angle-deg", type=float, default=15.0,
+                     help="R10: a road crossing at less than this runs along the alignment, not across it -> no_crossing")
+    ap.add_argument("--drop-classes", default="TRK",
+                     help="R11: IRC classes that never get a crossing (comma-separated; '' for none) -> no_crossing")
+    ap.add_argument("--minor-dead-end", choices=("drop", "review"), default="drop",
+                     help="R4 on a minor road (not a major class): drop it (no_crossing), or keep it for review")
     args = ap.parse_args()
 
     if args.region is None:
@@ -608,27 +660,40 @@ def main() -> None:
     write_geojson(gpd.GeoDataFrame(geometry=corridor_wgs, crs=4326), Path(args.corridor_output))
     print(f"wrote {args.corridor_output}")
 
-    roads = load_road_network(corridor_wgs.iloc[0], args).to_crs(epsg)
+    nic = load_road_network(corridor_wgs.iloc[0], args).to_crs(epsg).assign(road_source="nic")
+    osm = (load_osm_roads(corridor_wgs.iloc[0], region_paths(args.region)["osm_roads"], args.osm_max_age_days)
+           .to_crs(epsg).assign(road_source="osm") if args.osm else nic.iloc[:0])
+    roads = gpd.GeoDataFrame(pd.concat([nic, osm.drop(columns="osm_id", errors="ignore")], ignore_index=True),
+                             geometry="geometry", crs=epsg)
     write_geojson(roads.to_crs(4326), Path(args.roads_output))
     print(f"wrote {args.roads_output}")
 
     corridor = corridor_m
     align_barrier = unary_union(align.geometry.values)
 
-    cand = find_candidates(align, roads, align_barrier)
+    cand = find_candidates(align, nic, align_barrier)
     if cand.empty:
         print("No crossings found.")
         return
     print(f"\nstage 4: {len(cand)} crossing candidate(s) before R5 merge")
-
     cand = merge_dual_carriageways(cand, args.dual_merge_tol_m)
     print(f"stage 4: {len(cand)} crossing(s) after R5 dual-carriageway merge")
+    if len(osm):
+        extra = find_candidates(align, osm, align_barrier)
+        extra = merge_dual_carriageways(extra, args.dual_merge_tol_m) if len(extra) else extra
+        extra = drop_known_crossings(extra, cand, args.osm_buffer_m, args.osm_angle_deg)
+        print(f"stage 4: + {len(extra)} OSM crossing(s) with no NIC crossing within {args.osm_buffer_m:g} m")
+        cand = gpd.GeoDataFrame(pd.concat([cand, extra], ignore_index=True), geometry="geometry", crs=cand.crs)
 
     G = build_barrier_graph(roads, align, align_barrier)
     cand = apply_connectivity_rule(cand, G, corridor, args.min_component_len_m, args.junction_flag_m, args.skew_flag_deg)
+    cand = apply_identification_filters(cand, args)
     cand = init_width_columns(cand)
 
-    cand = cand.sort_values(["align_id", "chainage_m"]).reset_index(drop=True)
+    # NIC crossings first, numbered as they always were; OSM crossings after them - so adding OSM never
+    # renumbers a NIC crossing, and measure_width_sam3.py --resume can reuse every width already measured
+    cand["_osm"] = cand["road_source"] == "osm"
+    cand = cand.sort_values(["_osm", "align_id", "chainage_m"]).drop(columns="_osm").reset_index(drop=True)
     cand.insert(0, "crossing_id", [f"{args.id_prefix}-{i + 1:03d}" for i in range(len(cand))])
     cand = flag_nearby_crossings(cand, args.nearby_crossing_flag_m)  # needs metres, before reprojecting to WGS84
     cand_wgs = cand.to_crs(4326)

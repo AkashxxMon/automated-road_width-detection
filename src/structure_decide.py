@@ -15,21 +15,26 @@ union of where each one's road actually sits in the imagery (overlapping
 measurements count once), or, without imagery edges, its measured width
 centred on its crossing point.
 
+After S0-S6 below, R12 (thinning): a minor road within --thin-m (100 m) of a
+higher-ranked crossing (higher class, then measured, then wider) is diverted
+to it - MERGED, merged_into pointing at it.
+
 Then, per structure (the first match sets structure_type; flags add up and
 never change it):
   S0  decision = no_crossing (R2)                         -> NONE
-  S1  minor road (irc_class not in --major-classes) that  -> NIL_REROUTE, no structure
-      is unpaved. Surface: paved if EITHER SAM3's imagery
-      verdict (surface_sam3) or the road data's metalled
-      flag (surface) says paved - a paved road can't be
-      re-routed; else unpaved if either says so; else
-      unknown.
-      A paved minor road is kept (road_category
-      MINOR_PAVED), an unknown one too (flag
-      SURFACE_UNKNOWN; --unknown-surface reroute to drop
-      it) - both go through S2-S7 like a major road,
-      with --minor-clearance-m
-  S2  kept road (major or paved minor), no measured width -> PENDING_SURVEY
+  S1  minor road (irc_class not in --major-classes),      -> NIL_REROUTE, no structure
+      --minor-rule spacing (default): narrower than
+      --minor-keep-width-m (4 m, combined width) or within
+      --minor-divert-m (500 m) of a major-road crossing
+      (nearest_major_crossing_m) - it's diverted there -
+      or with no measured width. Otherwise kept
+      (road_category MINOR_KEPT) and sized by S3-S6 like
+      a major road, with --minor-clearance-m.
+      --minor-rule surface (the earlier rule): re-routed
+      if unpaved; paved if EITHER SAM3 (surface_sam3) or
+      the road data (surface) says so -> kept
+      (MINOR_PAVED); unknown -> kept, flag SURFACE_UNKNOWN
+  S2  kept road, no measured width                        -> PENDING_SURVEY
   S3  crossing angle below --skew-flag-deg (same as R7)   -> flag HIGH_SKEW, span_m left empty
                                                              whatever the structure turns out to be
   S4  more than one road (divided road per R5, or two+    -> DUAL_DESIGNER_DECISION: one box over the
@@ -74,7 +79,7 @@ DEFAULT_WALL_M = 0.5  # twin-box intermediate wall, if the box table doesn't giv
 CLASS_RANK = {c: i for i, c in enumerate(("EXP", "NH", "SH", "MDR", "ODR", "VR", "TRK", "PTH"))}
 
 STRUCTURE_COLUMNS = [
-    "road_category", "road_surface", "surface_source", "skew_angle_deg", "merged_into", "merged_ids", "n_roads", "combined_layout_m",
+    "road_category", "road_surface", "surface_source", "nearest_major_crossing_m", "skew_angle_deg", "merged_into", "merged_ids", "n_roads", "combined_layout_m",
     "combined_width_m", "opening_width_m", "structure_type", "structure_suggested", "structure_rule",
     "box_size", "box_split_size", "span_m", "span_each_m", "span_centre_chainage_m", "clearance_m",
     "structure_flags", "structure_reason",
@@ -278,12 +283,25 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
     surface, source = next((x for x in surfaces if x[0] == "paved"), None) or \
         next((x for x in surfaces if x[0] == "unpaved"), ("unknown", "none"))
     out["road_surface"], out["surface_source"] = surface, source
-    paved = args.keep_paved_minor and surface == "paved"
-    unknown_kept = args.keep_paved_minor and surface == "unknown" and args.surface_known and \
-        args.unknown_surface == "keep"
-    out["road_category"] = "MAJOR" if major else "MINOR_PAVED" if paved else \
+    widths, gaps = layout if layout is not None else ([], [])
+    whole = sum(widths) + sum(gaps) if widths else None
+    d_major = _num(rep.get("nearest_major_crossing_m"))
+    out["nearest_major_crossing_m"] = d_major
+    if args.minor_rule == "spacing":
+        # the designers keep a village road that is wide enough and has no major-road structure close by to
+        # divert it to (validation: 24% built within 500 m of a major-road crossing, 66% beyond 1 km)
+        near_major = d_major is not None and d_major <= args.minor_divert_m
+        narrow = whole is None or whole < args.minor_keep_width_m  # unmeasured: 17% built, so re-routed
+        spaced = not major and not near_major and not narrow
+        paved = unknown_kept = False
+    else:
+        spaced = near_major = narrow = False
+        paved = args.keep_paved_minor and surface == "paved"
+        unknown_kept = args.keep_paved_minor and surface == "unknown" and args.surface_known and \
+            args.unknown_surface == "keep"
+    out["road_category"] = "MAJOR" if major else "MINOR_KEPT" if spaced else "MINOR_PAVED" if paved else \
         "MINOR_SURFACE_UNKNOWN" if unknown_kept else "MINOR"
-    kept = major or paved or unknown_kept
+    kept = major or spaced or paved or unknown_kept
     ids = {m["crossing_id"] for m in members}
     if len(members) > 1:
         out["merged_ids"] = ";".join(sorted(ids - {rep["crossing_id"]}))
@@ -297,8 +315,6 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
     if rep["decision"] == "no_crossing":
         return finish("NONE", "S0", f"no structure needed ({rep['rule']}: {rep['reason']})")
 
-    widths, gaps = layout if layout is not None else ([], [])
-    whole = sum(widths) + sum(gaps) if widths else None
     if widths:
         out.update(n_roads=len(widths), combined_layout_m=road_layout_text(widths, gaps), combined_width_m=round(whole, 2))
     merged_note = (f"{len(members)} crossings ({', '.join(sorted(ids))}) within {args.corridor_merge_m:g} m of each "
@@ -307,6 +323,13 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
     if not kept:
         if (whole is not None and whole > args.class_check_width_m) or len(widths) > 1:
             flags.append("CLASS_CHECK")
+        if args.minor_rule == "spacing":
+            why = " and ".join(x for x in (
+                ("no measured width" if whole is None else f"only {whole:.1f} m wide (under {args.minor_keep_width_m:g} m)")
+                if narrow else "",
+                f"a major-road crossing is {d_major:.0f} m away" if near_major else "") if x)
+            return finish("NIL_REROUTE", "S1", f"{merged_note}{rep['irc_class']} is a minor road, {why} - "
+                                               f"re-route it to the nearest structure")
         known = f", {surface} ({source})" if source != "none" else ""
         return finish("NIL_REROUTE", "S1", f"{merged_note}{rep['irc_class']} is a minor road{known} - "
                                            f"re-route it to the nearest structure")
@@ -333,7 +356,10 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
 
     clearance = args.clearance_m if major else args.minor_clearance_m
     out["clearance_m"] = clearance
-    if paved and not major:
+    if spaced:
+        far = f"{d_major:.0f} m" if d_major is not None else "no major-road crossing in this region"
+        merged_note += f"{rep['irc_class']} is {whole:.1f} m wide, nearest major-road crossing {far} - kept (S1 spacing); "
+    elif paved and not major:
         merged_note += f"{rep['irc_class']} is paved ({source}) - kept, not re-routed; "
     elif unknown_kept and not major:
         flags.append("SURFACE_UNKNOWN")
@@ -415,6 +441,9 @@ def road_centre_chainage(row, tracks: dict) -> float | None:
 
 def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, args) -> pd.DataFrame:
     """Structure columns for every row of cross (in the metric CRS)."""
+    major_pts = cross.geometry[cross["irc_class"].isin(args.major_classes) & (cross["decision"] != "no_crossing")]
+    cross["nearest_major_crossing_m"] = (cross.geometry.apply(lambda p: round(float(major_pts.distance(p).min()), 1))
+                                         if len(major_pts) else np.nan)
     decided = {}
     for _, r in cross[cross["decision"] == "no_crossing"].iterrows():
         decided[r.name] = decide(r, None, [r], boxes, args)
@@ -463,11 +492,41 @@ def decide_all(cross: gpd.GeoDataFrame, boxes: pd.DataFrame, tracks: dict, args)
                 continue
             decided[m.name] = {**dict.fromkeys(STRUCTURE_COLUMNS),
                                "road_category": out["road_category"], "skew_angle_deg": round(90.0 - m["angle_deg"], 1),
+                               "nearest_major_crossing_m": m["nearest_major_crossing_m"],
                                "merged_into": rep["crossing_id"], "structure_type": "MERGED", "structure_rule": "R9",
                                "structure_reason": f"same road corridor as {rep['crossing_id']} (roads within "
                                                    f"{args.corridor_merge_m:g} m, edge to edge) - one structure, "
                                                    f"see {rep['crossing_id']}"}
+    thin_nearby(cross, decided, args)
     return pd.DataFrame.from_dict(decided, orient="index").reindex(cross.index)[STRUCTURE_COLUMNS]
+
+
+def thin_nearby(cross: gpd.GeoDataFrame, decided: dict, args) -> None:
+    """R12: a minor road within --thin-m of a higher-ranked crossing (higher
+    road class, then measured, then wider) is diverted to it - MERGED into it.
+    The designers built at only 16-23% of crossings within 100 m of another."""
+    if args.thin_m <= 0:
+        return
+    live = [i for i, o in decided.items() if o["structure_type"] not in ("MERGED", "NONE")]
+    width = {i: _num(decided[i]["combined_width_m"]) for i in live}
+    live.sort(key=lambda i: (CLASS_RANK.get(cross.at[i, "irc_class"], 99), width[i] is None, -(width[i] or 0)))
+    kept = []
+    for i in live:
+        pt = cross.geometry.at[i]
+        near = [(pt.distance(cross.geometry.at[k]), k) for k in kept]
+        near = [x for x in near if x[0] <= args.thin_m]
+        if cross.at[i, "irc_class"] in args.major_classes or not near:
+            kept.append(i)
+            continue
+        d, k = min(near)
+        rep = cross.at[k, "crossing_id"]
+        decided[i] = {**dict.fromkeys(STRUCTURE_COLUMNS), "road_category": decided[i]["road_category"],
+                      "road_surface": decided[i]["road_surface"], "surface_source": decided[i]["surface_source"],
+                      "skew_angle_deg": decided[i]["skew_angle_deg"],
+                      "nearest_major_crossing_m": decided[i]["nearest_major_crossing_m"],
+                      "merged_into": rep, "structure_type": "MERGED", "structure_rule": "R12",
+                      "structure_reason": f"minor road {d:.0f} m from {rep} ({cross.at[k, 'irc_class']}) - "
+                                          f"diverted to its crossing (--thin-m {args.thin_m:g})"}
 
 
 def parse_args():
@@ -487,6 +546,8 @@ def parse_args():
                      help="R9: crossings whose roads are within this of each other (edge to edge) share one structure")
     ap.add_argument("--corridor-angle-deg", type=float, default=15.0,
                      help="R9: only merge roads whose crossing angles differ by at most this (i.e. roughly parallel)")
+    ap.add_argument("--thin-m", type=float, default=100.0,
+                     help="R12: a minor road this close to a higher-ranked crossing is diverted to it (MERGED). 0 to disable")
     ap.add_argument("--edge-buffer-m", type=float, default=1.0, help="Added to the combined width on each side")
     ap.add_argument("--skew-flag-deg", type=float, default=45.0,
                      help="S3: below this crossing angle, flag HIGH_SKEW and leave span_m empty (same threshold as R7)")
@@ -494,10 +555,18 @@ def parse_args():
                      help="Vertical clearance a box must give a major road (org bridge-list template: major road 5.5 m)")
     ap.add_argument("--minor-clearance-m", type=float, default=4.0,
                      help="Vertical clearance for a kept (paved) minor road (org bridge-list template: minor road 4.0 m)")
+    ap.add_argument("--minor-rule", choices=("spacing", "surface"), default="spacing",
+                     help="S1: how a minor road is kept or re-routed. spacing (default): kept if at least "
+                          "--minor-keep-width-m wide and more than --minor-divert-m from a major-road crossing. "
+                          "surface: kept if paved (the earlier rule; see --keep-paved-minor, --unknown-surface)")
+    ap.add_argument("--minor-keep-width-m", type=float, default=4.0,
+                     help="S1 spacing: a minor road narrower than this (combined width) is re-routed")
+    ap.add_argument("--minor-divert-m", type=float, default=500.0,
+                     help="S1 spacing: a minor road this close to a major-road crossing is diverted to it")
     ap.add_argument("--keep-paved-minor", action=argparse.BooleanOptionalAction, default=True,
-                     help="S1: keep a paved minor road (imagery verdict, else road data) instead of re-routing it")
+                     help="S1 surface rule only: keep a paved minor road (imagery verdict, else road data)")
     ap.add_argument("--unknown-surface", choices=("keep", "reroute"), default="keep",
-                     help="S1: a minor road whose surface neither the imagery nor the road data settles")
+                     help="S1 surface rule only: a minor road whose surface neither the imagery nor the road data settles")
     ap.add_argument("--borderline-m", type=float, default=0.5,
                      help="Flag BORDERLINE when the opening is this close to the largest box span (or the transect IQR, if wider)")
     ap.add_argument("--road-offset-flag-m", type=float, default=10.0,

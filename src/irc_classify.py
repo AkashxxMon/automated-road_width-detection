@@ -17,7 +17,7 @@ _HIGHWAY_TO_IRC = {
     "primary": "SH", "primary_link": "SH",
     "secondary": "MDR", "secondary_link": "MDR",
     "tertiary": "ODR", "tertiary_link": "ODR",
-    "unclassified": "VR", "residential": "VR",
+    "unclassified": "VR", "residential": "VR", "living_street": "VR", "road": "VR",
     "track": "TRK",
     "path": "PTH", "footway": "PTH",
 }

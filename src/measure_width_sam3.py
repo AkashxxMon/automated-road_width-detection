@@ -461,7 +461,6 @@ def parse_args():
     fill_region_paths(args, REGION_PATH_ARGS)
     return args
 
-
 def main() -> None:
     args = parse_args()
 

@@ -84,6 +84,7 @@ def region_paths(region: str) -> dict[str, str]:
         "alignment": f"shared/alignment_{r}.geojson",
         "corridor": f"shared/corridor_{r}.geojson",
         "roads": f"shared/roads_{r}.geojson",
+        "osm_roads": f"shared/osm_roads_{r}.parquet",
         "crossings": f"output/{r}_crossings.geojson",
         "crossings_summary": f"output/{r}_crossings_summary.csv",
         "final": f"output/{r}_crossings_final_gl.geojson",

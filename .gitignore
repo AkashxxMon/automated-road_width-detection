@@ -7,10 +7,12 @@ cache/
 model/
 output/
 shared/*.geojson
-validation/*geojson
+shared/*.parquet
+validation/
 config/
 input/
 # copies of the design codes/standards from the Technical Data share - large and copyrighted,
 # kept local only; codes/SOURCES.md (the index) is tracked
 codes/*
 !codes/SOURCES.md
+*.qgz
