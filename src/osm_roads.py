@@ -14,6 +14,7 @@ Which zones a corridor needs comes from Geofabrik's zone outlines (.poly).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import time
@@ -104,7 +105,10 @@ def load_osm_roads(corridor_wgs84, cache_path: str, max_age_days: float = 30.0) 
     """OSM roads inside the corridor (EPSG:4326), as highway/ref/name/surface/osm_id/geometry -
     the same columns as the NIC roads. Cached at cache_path; delete it to re-read."""
     cache = Path(cache_path)
-    if cache.exists():
+    # the cache belongs to one corridor: a different alignment under the same region name re-reads
+    key = hashlib.sha1(corridor_wgs84.wkb).hexdigest()
+    key_file = cache.with_suffix(".key")
+    if cache.exists() and key_file.exists() and key_file.read_text().strip() == key:
         roads = gpd.read_parquet(cache)
         print(f"OSM roads: {len(roads)} from cache {cache} (delete it to refresh)")
         return roads
@@ -127,5 +131,6 @@ def load_osm_roads(corridor_wgs84, cache_path: str, max_age_days: float = 30.0) 
     roads = roads[["highway", "ref", "name", "surface", "osm_id", "geometry"]]
     cache.parent.mkdir(parents=True, exist_ok=True)
     roads.to_parquet(cache)
+    key_file.write_text(key)
     print(f"  {len(roads)} OSM road(s) in the corridor - cached to {cache}")
     return roads

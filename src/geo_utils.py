@@ -70,9 +70,12 @@ def region_slug(name: str) -> str:
 
 
 def region_prefix(region: str) -> str:
-    """Default crossing_id prefix for a region: its state code, else its first two letters."""
+    """Default crossing_id prefix for a region: its state code - also for a tagged region
+    such as maharashtra_newline (the longest state name it starts with) - else its first
+    two letters."""
     slug = region_slug(region)
-    return STATE_CODES.get(slug, slug[:2].upper())
+    states = [k for k in STATE_CODES if slug == k or slug.startswith(k + "_")]
+    return STATE_CODES[max(states, key=len)] if states else slug[:2].upper()
 
 
 def region_paths(region: str) -> dict[str, str]:

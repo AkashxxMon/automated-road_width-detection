@@ -3,7 +3,7 @@ the road network for a corridor around it from local NIC road data, plus
 OpenStreetMap roads where NIC has none (Geofabrik extracts, downloaded once -
 see osm_roads.py), and find every point where a road crosses the alignment -
 chainage, crossing angle, IRC road class, the connectivity/dead-end rule (R1,
-R2, R4) and the identification filters (R10, R11, minor-road R4). The IRC class assigned here is used
+R2) and the identification filters (R10, R11). The IRC class assigned here is used
 later only to flag an implausible measurement for review - design
 width/span come entirely from the SAM3 measurement (stage 6, a separate
 step - see measure_width_sam3.py), not from an IRC minimum.
@@ -34,11 +34,10 @@ import networkx as nx
 import pandas as pd
 from shapely.geometry import Point
 from shapely.ops import split, unary_union
-from shapely.prepared import prep
 
 from geo_utils import (flatten_geom, get_utm_epsg, region_paths, region_prefix, region_slug, remember_region,
                        write_csv, write_geojson)
-from irc_classify import MAJOR_CLASSES, classify
+from irc_classify import classify
 from osm_roads import load_osm_roads
 from shapely.strtree import STRtree
 
@@ -68,7 +67,10 @@ def resolve_boundary(args):
     given): --state (looked up by name in --states-file), --boundary (a
     polygon file directly), or neither passed at all (falls back to this
     project's own default boundary file). Pass --boundary "" explicitly to
-    get no clip at all (use the whole alignment input)."""
+    get no clip at all (use the whole alignment input) - or --boundary none, which
+    PowerShell passes through where it drops an empty ""."""
+    if args.boundary is not None and args.boundary.strip().lower() in ("none", "all"):
+        args.boundary = ""  # a spelling of "" that survives PowerShell, which drops empty arguments
     if args.state is not None and args.boundary is not None:
         raise SystemExit("Pass --state or --boundary, not both.")
 
@@ -445,27 +447,8 @@ def build_barrier_graph(roads: gpd.GeoDataFrame, align: gpd.GeoDataFrame, align_
     return G
 
 
-def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, corridor,
-                             min_component_len_m: float, junction_flag_m: float, skew_flag_deg: float) -> gpd.GeoDataFrame:
-    inner = prep(corridor.buffer(-5.0))
-    comp_of, comps, comp_ok = {}, [], {}
-    for i, comp in enumerate(nx.connected_components(G)):
-        comps.append(comp)
-        comp_of.update(dict.fromkeys(comp, i))
-
-    def connected(n) -> bool:
-        i = comp_of[n]
-        if i not in comp_ok:  # one answer per component - with a node per vertex, components are large
-            comp = comps[i]
-            leaves_window = any(
-                not inner.contains(Point(k)) for k in comp if not (isinstance(k, tuple) and k and k[0] == "X")
-            )
-            subg = G.subgraph(comp)
-            has_junction = any(deg >= 3 for _, deg in subg.degree())
-            comp_len = sum(d.get("length", 0.0) for _, _, d in subg.edges(data=True))
-            comp_ok[i] = leaves_window or (has_junction and comp_len >= min_component_len_m)
-        return comp_ok[i]
-
+def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, junction_flag_m: float,
+                            skew_flag_deg: float) -> gpd.GeoDataFrame:
     # the two halves' nodes at each crossing point: the nearest on each side within 0.5 m, rather
     # than an exact 0.1 m-rounded key - a rounding miss would otherwise drop a real crossing as
     # R2. Nearest, because another road can cross the alignment a few decimetres away
@@ -480,13 +463,10 @@ def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, corridor,
         ends = [n for _, n in nearest.values()]
         if len(ends) < 2:
             return "no_crossing", "R2", "road ends at the alignment - only one side present in the network"
-        if all(connected(n) for n in ends):
-            return "crossing", "R1", "both halves reach another road or leave the corridor window"
-        # no R3 ("neither half connects -> no crossing"): a road the alignment physically cuts through
-        # is never dropped just because the road data doesn't join it up - NIC is a merge of state
-        # exports with gaps between them, so an unconnected line is a data gap, not a missing road
-        return "review", "R4", ("one or both halves dead-end near the alignment without reaching the wider "
-                                "network - check imagery for buildings/habitation and whether the road carries on")
+        # no R3/R4 (a road whose halves don't join the wider network): a road the alignment physically
+        # cuts through is never dropped or queried because the road data doesn't join it up - NIC is a
+        # merge of state exports with gaps between them, so an unconnected line is a data gap
+        return "crossing", "R1", "the road is present on both sides of the alignment"
 
     decisions = cand.geometry.apply(decide)
     cand["decision"] = decisions.apply(lambda t: t[0])
@@ -517,18 +497,14 @@ def drop_known_crossings(extra: gpd.GeoDataFrame, known: gpd.GeoDataFrame, buffe
 
 
 def apply_identification_filters(cand: gpd.GeoDataFrame, args) -> gpd.GeoDataFrame:
-    """R10, R11 and the minor-road R4 drop: crossings that, scored against the
-    designers' bridges, are almost never one (angle under 15 deg 4%, tracks
-    19%, minor R4 17%) become no_crossing - kept in the register with the
+    """R10 and R11: crossings that, scored against the designers' bridges, are
+    almost never one (angle under 15 deg 4%, tracks 19%) become no_crossing - kept in the register with the
     reason, but not measured or given a structure."""
     drop_classes = {c.strip().upper() for c in args.drop_classes.split(",") if c.strip()}
-    minor = ~cand["irc_class"].isin(MAJOR_CLASSES)
     rules = [
         (cand["angle_deg"] < args.min_angle_deg, "R10",
          f"road runs along the alignment (crossing angle below {args.min_angle_deg:g} deg), not across it"),
         (cand["irc_class"].isin(drop_classes), "R11", "road class excluded (--drop-classes)"),
-        ((cand["decision"] == "review") & minor & (args.minor_dead_end == "drop"), "R4",
-         "minor road that dead-ends near the alignment - dropped (--minor-dead-end drop)"),
     ]
     for mask, rule, reason in rules:
         mask = mask & (cand["decision"] != "no_crossing")
@@ -592,7 +568,7 @@ def parse_args():
                           "needing your own boundary file. Cannot be combined with --boundary.")
     ap.add_argument("--states-file", default=DEFAULT_STATES_FILE, help="All-India state boundaries file used by --state")
     ap.add_argument("--state-name-field", default=DEFAULT_STATE_NAME_FIELD, help="Property in --states-file holding the state name")
-    ap.add_argument("--corridor-km", type=float, default=2.0, help="Corridor half-width (km) for the road-data crop and the connectivity-rule window")
+    ap.add_argument("--corridor-km", type=float, default=2.0, help="Corridor half-width (km) for the road-data crop")
     ap.add_argument("--roads-glob", default=DEFAULT_ROADS_GLOB,
                      help="Glob for local NIC road parquet file(s) to load and crop to the corridor")
     ap.add_argument("--min-segment-m", type=float, default=50.0, help="Drop alignment slivers shorter than this after clipping")
@@ -608,7 +584,6 @@ def parse_args():
     ap.add_argument("--alignment-output", default=None, help="Where to save the clipped alignment")
     ap.add_argument("--roads-output", default=None, help="Where to save the loaded road network")
     ap.add_argument("--corridor-output", default=None, help="Where to save the corridor polygon")
-    ap.add_argument("--min-component-len-m", type=float, default=300.0, help="Min network length for a component without leaving the corridor to count as connected")
     ap.add_argument("--dual-merge-tol-m", type=float, default=30.0, help="R5: merge distance for same-ref dual-carriageway crossings")
     ap.add_argument("--junction-flag-m", type=float, default=50.0, help="R6: flag a crossing within this of an existing junction")
     ap.add_argument("--skew-flag-deg", type=float, default=45.0, help="R7: flag a crossing angle below this")
@@ -624,10 +599,10 @@ def parse_args():
                      help="R10: a road crossing at less than this runs along the alignment, not across it -> no_crossing")
     ap.add_argument("--drop-classes", default="TRK",
                      help="R11: IRC classes that never get a crossing (comma-separated; '' for none) -> no_crossing")
-    ap.add_argument("--minor-dead-end", choices=("drop", "review"), default="drop",
-                     help="R4 on a minor road (not a major class): drop it (no_crossing), or keep it for review")
     args = ap.parse_args()
 
+    if args.boundary is not None and args.boundary.strip().lower() in ("none", "all"):
+        args.boundary = ""
     if args.region is None:
         if args.state is not None:
             args.region = args.state
@@ -668,7 +643,6 @@ def main() -> None:
     write_geojson(roads.to_crs(4326), Path(args.roads_output))
     print(f"wrote {args.roads_output}")
 
-    corridor = corridor_m
     align_barrier = unary_union(align.geometry.values)
 
     cand = find_candidates(align, nic, align_barrier)
@@ -686,7 +660,7 @@ def main() -> None:
         cand = gpd.GeoDataFrame(pd.concat([cand, extra], ignore_index=True), geometry="geometry", crs=cand.crs)
 
     G = build_barrier_graph(roads, align, align_barrier)
-    cand = apply_connectivity_rule(cand, G, corridor, args.min_component_len_m, args.junction_flag_m, args.skew_flag_deg)
+    cand = apply_connectivity_rule(cand, G, args.junction_flag_m, args.skew_flag_deg)
     cand = apply_identification_filters(cand, args)
     cand = init_width_columns(cand)
 

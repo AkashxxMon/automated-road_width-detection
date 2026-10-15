@@ -27,6 +27,7 @@ Usage:
     python src/score_validation.py                                  # every region with a reference file
     python src/score_validation.py --region maharashtra jharkhand --match-m 50
     python src/score_validation.py --region jharkhand --structures some/other_structures.geojson
+    python src/score_validation.py --region kothagudem_kirandul --reference validation/Road_crossings_Kothagudem_Kirandul.geojson
 """
 
 from __future__ import annotations
@@ -77,11 +78,15 @@ def match(ours: gpd.GeoSeries, ref: gpd.GeoDataFrame, max_m: float) -> dict:
     return out
 
 
-def score_region(region: str, structures: str | None, match_m: float, max_ref_offset_m: float):
+def score_region(region: str, structures: str | None, match_m: float, max_ref_offset_m: float,
+                 reference: str | None = None):
     paths = region_paths(region)
     cross = gpd.read_file(structures or latest(paths["structures"])).to_crs(EPSG)
     align = gpd.read_file(latest(paths["alignment"])).to_crs(EPSG)
-    ref = reference_points(REFERENCE.format(region=region), align)
+    ref_path = reference or REFERENCE.format(region=region)
+    if not Path(ref_path).exists():
+        raise SystemExit(f"{ref_path} not found - the designers' bridges for {region}. Pass --reference <file>")
+    ref = reference_points(ref_path, align)
     n_off = int((ref["offset_m"] > max_ref_offset_m).sum())
     ref = ref[ref["offset_m"] <= max_ref_offset_m]
 
@@ -123,6 +128,8 @@ def main() -> None:
                      help="Regions to score. Default: every region with a " + REFERENCE.format(region="<region>"))
     ap.add_argument("--structures", default=None,
                      help="Structure register to score (one region only). Default: output/<region>_structures.geojson")
+    ap.add_argument("--reference", default=None,
+                     help="The designers' bridge/crossing lines (one region only). Default: " + REFERENCE.format(region="<region>"))
     ap.add_argument("--match-m", type=float, default=30.0, help="A designers' bridge within this of a crossing matches it")
     ap.add_argument("--max-ref-offset-m", type=float, default=200.0,
                      help="A designers' bridge further than this off our alignment is on another line - not scored")
@@ -131,13 +138,13 @@ def main() -> None:
     regions = [region_slug(r) for r in args.region] if args.region else sorted(
         p.stem.replace("Bridges_road_crossings_lines_", "") for p in Path("validation").glob("Bridges_road_crossings_lines_*.geojson")
         if Path(region_paths(p.stem.replace("Bridges_road_crossings_lines_", ""))["structures"]).exists())
-    if args.structures and len(regions) != 1:
-        raise SystemExit("--structures needs exactly one --region")
+    if (args.structures or args.reference) and len(regions) != 1:
+        raise SystemExit("--structures and --reference need exactly one --region")
 
     table, all_rows, n_all, off_all = {}, [], 0, 0
     out = Path(args.output_dir)
     for region in regions:
-        pred, missing, n_ref, n_off = score_region(region, args.structures, args.match_m, args.max_ref_offset_m)
+        pred, missing, n_ref, n_off = score_region(region, args.structures, args.match_m, args.max_ref_offset_m, args.reference)
         cols = ["state", "crossing_id", "road_source", "irc_class", "structure_type", "road_category", "measured_width_m",
                 "nearest_major_crossing_m", "road_surface", "decision", "outcome", "designers_line_fid", "designers_dist_m"]
         write_csv(pred[[c for c in cols if c in pred.columns]], out / f"{region}_validation_crossings.csv")

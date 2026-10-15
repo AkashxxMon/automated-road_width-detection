@@ -64,6 +64,14 @@ python -m venv .venv
 .venv\Scripts\python.exe src\make_review_map.py           # output/maharashtra_review_map.html
 ```
 
+**Another alignment for the same state.** Every file is named after the region, so a second line run as plain `--state Maharashtra` would overwrite the first one's results. Give it its own region with a tag instead — `run_states.ps1` does it for you:
+
+```powershell
+.\run_states.ps1 -Alignment input\new_line.geojson -Tag newline -States "Maharashtra","Jharkhand"
+```
+
+That writes `output/maharashtra_newline_*` (crossing IDs still `MH-001`…), with its own OSM cache. By hand it's `crossing_identify.py --state Maharashtra --alignment input\new_line.geojson --region maharashtra_newline`, then `--region maharashtra_newline` on the later steps. Any line file geopandas reads works (GeoJSON, KML, shapefile, GeoPackage); without a `feature_type` field every line is used, and without `section_id` the pieces are named `seg1`, `seg2`… Don't use `--resume` on a region whose alignment changed — the saved widths belong to the old crossings. To score it, add the designers' bridges as `validation/Bridges_road_crossings_lines_<region>.geojson`.
+
 If a file was open in QGIS when a step tried to overwrite it, the step writes a `.tmp` copy beside it instead; the next step reads that newer copy automatically.
 
 **Quick try with no arguments** — every command falls back to the example alignment/boundary already bundled under `input/` in this checkout, so you can run the same commands above with no flags at all and get a working result immediately:
@@ -96,20 +104,19 @@ Open the resulting HTML file in a browser afterward to see the results on a map.
 2. **Fetch the road network.** Loads every road from the local NIC road data (`input/Roads/*.parquet`) within a corridor around that alignment (2km either side, by default), plus **OpenStreetMap roads** (`src/osm_roads.py`, `--no-osm` to skip). OSM comes from Geofabrik's India zone extracts, not the Overpass API: Overpass gives each IP only a couple of query slots and starts refusing after a handful of big queries, while Geofabrik serves each zone as one `.osm.pbf` file (one plain download, refreshed daily, no query limits). The file is downloaded once to `input/osm/` (re-downloaded after 30 days, `--osm-max-age-days`), read locally, and the corridor's roads cached in `shared/osm_roads_<region>.parquet` — delete that to refresh. Drivable roads only (no service roads, footways, paths, construction). An OSM crossing is added only if no NIC crossing on the same alignment piece is within 60 m at a similar angle (±20°) — the buffer that stops one road being counted twice (`--osm-buffer-m`, `--osm-angle-deg`); `road_source` says `nic` or `osm`. NIC crossings keep the numbers they always had and OSM ones are numbered after them, so `measure_width_sam3.py --resume` reuses every width already measured.
 3. **Find every crossing.** Wherever a road physically intersects the alignment, record the point, how far along the alignment it is (`chainage_m`), and the angle between the road and the track (`angle_deg`).
 4. **Classify the road.** Each road gets sorted into an IRC category (`NH`/`SH`/`MDR`/`ODR`/`VR`/`TRK`/`PTH`/`EXP`) based on its OpenStreetMap tags. This class **no longer sets the design width** — it's used later only to flag a measurement as suspicious if it doesn't look right for that kind of road.
-5. **Decide whether a structure is needed** (rules R1, R2, R4–R8). The road network is joined up at every shared vertex, not just at line ends — NIC road lines run straight through junctions.
-   - **R1** — the road connects to the wider network on both sides → **needs a structure**.
+5. **Decide whether a structure is needed** (rules R1, R2, R5–R8, R10, R11). The road network is joined up at every shared vertex, not just at line ends — NIC road lines run straight through junctions.
+   - **R1** — the road is present on both sides of the alignment → **needs a structure**.
    - **R2** — the road just dead-ends at the alignment on one side → **no structure needed**.
    - **R3** — *removed.* It used to drop a crossing as "no structure, likely a mapping error" when neither side connected to anything. In NIC data an unconnected road line is a gap between state datasets, not a missing road, so a road the alignment actually cuts through is never dropped this way — that case now goes to R4.
-   - **R4** — one or both sides dead-end near the alignment without reaching the wider network → **flagged for review**.
+   - **R4** — *removed.* It used to flag (and, for a minor road, drop) a crossing whose road halves don't reach the wider network. NIC is a merge of state exports with gaps between them, and the designers built at only 17% of those dropped minor roads' crossings but at many of the rest, so a road present on both sides of the alignment is now simply a crossing (R1).
    - **R5** — two road segments right next to each other sharing the same route number (a divided highway, e.g. both `NH48`) → merged into one crossing. Only a real route number counts: most NIC refs are just the class code (`SH`, `ODR`), which every road of that class shares, so those never merge here — divided roads without a route number are merged later from their measured widths (R9 in step 3).
    - **R6** — flagged if within 50m of an existing road junction.
    - **R7** — flagged if the crossing angle is sharp (below 45°) — the structure will need to be much longer than the road is wide.
    - **R8** — flagged if another crossing sits within 40m on the same alignment segment — usually the same road mapped twice, or a genuine parallel track; needs a human decision on whether it's one structure or two.
    - **R10** — crossing angle below 15° (`--min-angle-deg`): the road runs along the alignment, not across it → **no crossing**.
    - **R11** — road class in `--drop-classes` (default `TRK`, tracks) → **no crossing**.
-   - **R4 on a minor road** (village road, street, path) → **no crossing** too (`--minor-dead-end review` keeps it for review instead); on a major road it stays a review.
 
-   R10, R11 and the minor-road R4 drop come from scoring against the designers' bridges: they built at 4% of crossings under 15°, 19% of tracks and 17% of minor dead-ends. Dropped crossings stay in the file with the rule and reason, but aren't measured.
+   R10 and R11 come from scoring against the designers' bridges: they built at 4% of crossings under 15° and 19% of tracks. Dropped crossings stay in the file with the rule and reason, but aren't measured.
 
 Output: one GeoJSON file, one row per crossing, with a decision but no width yet.
 
@@ -150,7 +157,7 @@ Then, for each structure (the first rule that matches sets `structure_type`; fla
 
 - `opening_width_m` = combined width + 1 m buffer each side (`--edge-buffer-m`).
 - Box sizes come from `config/box_sizes.csv`, taken from the RDSO "DFC Loading" tables (single cell double track, 1–6 m spans; twin cell 4–6 m). A box's height is the smallest standard height clearing 5.5 m (`--clearance-m`, the organisation's major-road clearance), so in practice 6.0 m. The largest standard box is 6 m, so any road with an opening over 6 m gets a bridge.
-- Other flags: `SUSPECT_WIDTH`, `BORDERLINE` (opening within 0.5 m of the 6 m box limit), `CORRIDOR_MERGED`, `LAYOUT_APPROX` (some merged crossing has no imagery road edges), `DUAL_MISMATCH` (road data and imagery disagree on divided), `CONNECTIVITY_REVIEW` (R4), `NEAR_JUNCTION` (R6), `NEARBY_CROSSING` (R8, not already merged), `ROAD_OFFSET` (the road in the imagery meets the track more than 10 m from where the road data's line does — check the QA crop).
+- Other flags: `SUSPECT_WIDTH`, `BORDERLINE` (opening within 0.5 m of the 6 m box limit), `CORRIDOR_MERGED`, `LAYOUT_APPROX` (some merged crossing has no imagery road edges), `DUAL_MISMATCH` (road data and imagery disagree on divided), `NEAR_JUNCTION` (R6), `NEARBY_CROSSING` (R8, not already merged), `ROAD_OFFSET` (the road in the imagery meets the track more than 10 m from where the road data's line does — check the QA crop).
 
 Output: the structure register (`output/<region>_structures.geojson` + CSV, every attribute) and a geometry layer (`output/<region>_structure_geometry.geojson`) with one line per crossing that has a structure decision of its own (not `MERGED`, not `NONE`): the measured road width, drawn to scale across the road where the road in the imagery meets the track (so it sits at the crossing angle to the track). No span line is drawn: the span is the `span_m` attribute. The layer keeps only what a map needs, copied as they are from the register: `crossing_id`, `measured_width_m`, `Assumed_irc_class`, `road_surface` (paved/unpaved/unknown), `surface_source` (imagery/road data), `skew_angle_deg` (90 − crossing angle, 0 = square), `Assumed_structure_type`, `Assumed_box_size`, `Assumed_opening_width_m`, `Assumed_span_m`, `structure_flags` — everything else is in the register (which also carries the `Assumed_` columns). "Assumed" because they come from imagery and rules, not a survey.
 

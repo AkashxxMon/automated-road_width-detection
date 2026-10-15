@@ -338,8 +338,6 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
         flags.append("CORRIDOR_MERGED")
     if any("SUSPECT" in str(m.get("width_source")) for m in members):
         flags.append("SUSPECT_WIDTH")
-    if any(m["decision"] == "review" for m in members):
-        flags.append("CONNECTIVITY_REVIEW")
     if any(_is_true(m.get("near_junction")) for m in members):
         flags.append("NEAR_JUNCTION")
     if any(pd.notna(m.get("nearby_crossing_id")) and m["nearby_crossing_id"] not in ids for m in members):

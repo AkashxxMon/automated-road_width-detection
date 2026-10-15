@@ -58,7 +58,7 @@ REGION_PATH_ARGS = {"crossings": "crossings", "roads": "roads", "alignment": "al
                     "width_geometry_output": "width_geometry"}
 DEFAULT_MODEL_DIR = "model/sam3"
 
-DETECT_THRESHOLD = 0.4  # SAM3's own example uses 0.5; slightly looser since a small crop has few distractors
+DETECT_THRESHOLD = 0.35  # SAM3's own example uses 0.5; slightly looser since a small crop has few distractors
 
 # road surface from SAM3 alone: the confidence of the "asphalt road" instance at the measured road
 # against the best "dirt road"/"dirt track" instance there. The dirt prompts also fire on dusty paved
