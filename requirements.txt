@@ -7,6 +7,9 @@ pyarrow
 networkx
 folium
 requests
+fastapi        # web viewer (webapp/server.py)
+uvicorn
+python-multipart
 pillow
 numpy
 # torch/torchvision: install separately for GPU support, e.g.
@@ -15,6 +18,6 @@ numpy
 # still run, just much slower)
 torch
 torchvision
-sam2
+# sam2
 huggingface_hub
 transformers>=5.17  # needed for Sam3Model/Sam3Processor (measure_width_sam3.py)

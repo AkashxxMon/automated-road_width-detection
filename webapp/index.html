@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rail-Road Crossing Detection</title>
+<script>/* theme before first paint: saved choice, else the system setting */
+(function () { var t = null; try { t = localStorage.getItem("rrcd.theme"); } catch (e) {}
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = t; })();</script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+/* Blue theme: every section of the inputs panel is a card with a title bar in its own shade of blue,
+   buttons are raised and lift when hovered, and the header is a bar across the top. */
+:root {
+  --blue-900: #2F4858; --blue-800: #2c5a7a; --blue-700: #33658A; --blue-600: #3f7ea6; --blue-500: #55DDE0;
+  --blue-300: #8de7e9; --blue-200: #a6e9eb; --blue-100: #cdf3f4; --blue-50: #e9fafa;
+  --orange: #F26419; --amber: #F6AE2D;
+  --ink: #263b49; --muted: #5a7080; --line: #c7e6e8;
+  --bg: #eef7f8; --panel: #ffffff; --soft: var(--blue-50);
+  --accent: var(--blue-700);
+  --ok: #2a8a5a; --warn: #c25410; --bad: #c2362f;
+  --review: #fff1df; --sel: var(--blue-100);
+  /* structure colours on the map and in the table */
+  --bridge: #F26419; --box: #2a8a5a; --dual: #7b45c4; --pending: #F6AE2D; --reroute: #8a9aab; --merged: #c3d3da; --none: #2F4858;
+  /* surfaces, light theme */
+  --surface: #ffffff; --surface-2: #f6fcfc; --btn-top: #ffffff; --btn-bottom: #e6f8f8; --side-top: #e2f1f3; --side-bottom: #eef7f8;
+  --halo: #ffffff; --card-line: rgba(255, 255, 255, 0.55); --tint-amt: 92%;
+  --dis-ink: #8a9aab; --dis-bg: #e9eff1; --dis-line: #d3dfe3;
+  --header-grad: linear-gradient(100deg, #2F4858 0%, #33658A 62%, #3f86ad 100%);
+}
+/* dark theme: the same blues on dark slate; the accents stay, surfaces and text flip */
+:root[data-theme="dark"] {
+  --blue-900: #d3e9ef; --blue-800: #b5d8e6; --blue-700: #7fb6d9; --blue-600: #6aa7cf;
+  --blue-300: #2f6f80; --blue-200: #2e5568; --blue-100: #23404f; --blue-50: #1b3240;
+  --ink: #dbe8ee; --muted: #93a9b6; --line: #2b4452;
+  --bg: #111b21; --panel: #16242d; --soft: #1b3240;
+  --ok: #4cc38a; --warn: #f08a4b; --bad: #ef6b63; --review: #3b2a1b; --sel: #23404f;
+  --none: #9fb3c0; --merged: #6f8593; --reroute: #8a9aab;
+  --surface: #192a34; --surface-2: #1d313c; --btn-top: #25394a; --btn-bottom: #1d2f3c; --side-top: #15232b; --side-bottom: #111b21;
+  --halo: #0d161b; --card-line: rgba(255, 255, 255, 0.06); --tint-amt: 7%;
+  --dis-ink: #6c7f8b; --dis-bg: #1d2a32; --dis-line: #2b3a44;
+  --header-grad: linear-gradient(100deg, #18262f 0%, #22445c 62%, #2c5a7a 100%);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; width: 100%; height: 100%; }
+body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: var(--ink); background: var(--bg); }
+h3, h4 { margin: 0 0 8px; }
+a { color: var(--blue-700); }
+
+/* ---------------------------------------------------------------- layout */
+.app { display: flex; flex-direction: column; height: 100vh; }
+.app-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 76px; padding: 0 22px; flex-shrink: 0;
+  color: #fff; background: var(--header-grad); box-shadow: 0 3px 14px rgba(47, 72, 88, 0.35);
+  position: relative; z-index: 1100; }
+.brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.brand .logo { width: 46px; height: 46px; padding: 7px; background: #fff; border-radius: 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28); flex-shrink: 0; }
+.brand-text { min-width: 0; }
+.page-title { display: flex; align-items: center; gap: 10px; position: relative; }
+.page-title h3 { flex: 0 0 auto; margin: 0; font-size: 25px; font-weight: 800; letter-spacing: 0.3px; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+.tagline { margin-top: 2px; font-size: 12.5px; color: rgba(255, 255, 255, 0.88); }
+.header-actions { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+.app-body { position: relative; display: grid; grid-template-columns: 410px 1fr; flex: 1; min-height: 0; }
+.app.collapsed .app-body { grid-template-columns: 0 1fr; }
+.app.collapsed .sidebar { display: none; }
+.sidebar { position: relative; padding: 16px 14px 0; overflow-y: auto; background: linear-gradient(180deg, var(--side-top) 0%, var(--side-bottom) 100%);
+  border-right: 1px solid var(--line); }
+
+/* ---------------------------------------------------------------- section cards, each in its own blue */
+.card { --accent: var(--blue-700); --accent2: var(--blue-500); --tint: #f4fafb; position: relative; margin: 0 0 16px; padding: 0 14px 14px;
+  background: color-mix(in srgb, var(--tint) var(--tint-amt), var(--surface)); border: 1px solid var(--card-line); border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(47, 72, 88, 0.1), 0 6px 16px rgba(47, 72, 88, 0.08); }
+.card.c-data   { --accent: #33658A; --accent2: #55DDE0; --tint: #f2fbfb; }   /* blue to cyan */
+.card.c-area   { --accent: #2F4858; --accent2: #33658A; --tint: #f3f8fa; }   /* slate to blue */
+.card.c-layers { --accent: #33658A; --accent2: #2F4858; --tint: #f2f6f8; }   /* blue to slate */
+.card.c-match  { --accent: #3f7ea6; --accent2: #8de7e9; --tint: #f2f9fb; }   /* mid blue to light cyan */
+.card.c-result { --accent: #2F4858; --accent2: #55DDE0; --tint: #f1fbfb; }   /* slate to cyan */
+.card.c-struct { --accent: #2c5a7a; --accent2: #3f7ea6; --tint: #f2f7fa; }   /* deep blue to blue */
+.card-head { display: flex; align-items: center; gap: 8px; margin: 0 -14px 12px; padding: 9px 14px; color: #fff; list-style: none; cursor: pointer;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 11px 11px 0 0; position: relative; }
+.card-head::-webkit-details-marker { display: none; }
+.card-head::after { content: "\25BE"; margin-left: 6px; font-size: 12px; opacity: .85; transition: transform .15s; }
+details.card:not([open]) { padding-bottom: 0; }
+details.card:not([open]) > .card-head { margin-bottom: 0; border-radius: 11px; }
+details.card:not([open]) > .card-head::after { transform: rotate(-90deg); }
+.card-head h4 { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 700; letter-spacing: 0.2px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-head .n { display: inline-grid; place-items: center; width: 21px; height: 21px; border-radius: 50%; background: rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.5); font-size: 11.5px; font-weight: 700; }
+.card-head .hint { flex-shrink: 0; font-size: 12px; font-weight: 500; color: rgba(255, 255, 255, 0.9); white-space: nowrap; }
+.body { padding: 0; }
+.inner { padding: 8px 12px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+
+/* ---------------------------------------------------------------- raised buttons */
+button, a.btn { font-family: inherit; font-size: 13px; font-weight: 600; color: var(--blue-900); text-decoration: none; display: inline-block;
+  background: linear-gradient(180deg, var(--btn-top) 0%, var(--btn-bottom) 100%); border: 1px solid var(--blue-200); border-radius: 9px; padding: 6px 13px; cursor: pointer;
+  box-shadow: 0 2px 0 var(--blue-200), 0 4px 10px rgba(47, 72, 88, 0.16); transition: transform 0.08s ease, box-shadow 0.08s ease, filter 0.15s ease; }
+button:hover:not(:disabled), a.btn:hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 3px 0 var(--blue-200), 0 8px 16px rgba(47, 72, 88, 0.24); }
+button:active:not(:disabled), a.btn:active { transform: translateY(2px); box-shadow: 0 0 0 var(--blue-200), 0 1px 3px rgba(47, 72, 88, 0.2); }
+button:disabled { cursor: not-allowed; color: var(--dis-ink); background: var(--dis-bg); border-color: var(--dis-line); box-shadow: none; }
+button:focus-visible, a.btn:focus-visible { outline: 3px solid rgba(85, 221, 224, 0.6); outline-offset: 1px; }
+button.primary { color: #fff; background: linear-gradient(180deg, #4a8bb3 0%, #33658A 100%); border-color: #2F4858; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 3px 0 #2F4858, 0 6px 14px rgba(47, 72, 88, 0.35); }
+button.primary:hover:not(:disabled) { box-shadow: 0 4px 0 #2F4858, 0 10px 20px rgba(47, 72, 88, 0.42); }
+button.primary:active:not(:disabled) { box-shadow: 0 0 0 #2F4858, 0 2px 4px rgba(47, 72, 88, 0.3); }
+button.primary:disabled { color: #fff; background: #a7bcc6; border-color: #98b0bc; text-shadow: none; }
+button.big { padding: 9px 22px; font-size: 15px; border-radius: 11px; }
+/* the Run button: the one orange action */
+#run:not(:disabled) { color: #fff; background: linear-gradient(180deg, #F6AE2D 0%, #F26419 100%); border-color: #c2510f;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3); box-shadow: 0 3px 0 #c2510f, 0 6px 14px rgba(242, 100, 25, 0.35); }
+#run:hover:not(:disabled) { box-shadow: 0 4px 0 #c2510f, 0 10px 20px rgba(242, 100, 25, 0.42); }
+#run:active:not(:disabled) { box-shadow: 0 0 0 #c2510f, 0 2px 4px rgba(242, 100, 25, 0.3); }
+button.mini { padding: 1px 9px; font-size: 11.5px; border-radius: 7px; box-shadow: 0 1px 0 var(--blue-200), 0 2px 5px rgba(47, 72, 88, 0.14); }
+button.plain { background: none; border: none; box-shadow: none; text-shadow: none; transform: none; filter: none; }
+button.plain:hover:not(:disabled), button.plain:active:not(:disabled) { transform: none; box-shadow: none; filter: brightness(0.85); }
+button.on-dark, a.btn.on-dark { color: #fff; background: rgba(255, 255, 255, 0.18); border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.18), 0 4px 10px rgba(0, 0, 0, 0.18); }
+button.on-dark:hover:not(:disabled), a.btn.on-dark:hover { background: rgba(255, 255, 255, 0.3); box-shadow: 0 3px 0 rgba(0, 0, 0, 0.2), 0 8px 14px rgba(0, 0, 0, 0.22); }
+
+/* ---------------------------------------------------------------- form controls */
+label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12.5px; }
+label[title], .chips[title] { cursor: help; }
+label[title]::after { content: " \24D8"; color: var(--blue-700); font-size: 11px; }
+label.check[title]::after, .chips label::after { content: none; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 5px 7px; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--blue-200); border-radius: 7px; }
+select:focus, input[type="text"]:focus, input[type="number"]:focus { outline: 2px solid rgba(85, 221, 224, 0.55); border-color: var(--blue-600); }
+input[type="file"] { width: 100%; font: inherit; font-size: 12.5px; color: var(--muted); }
+input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 12px; font: inherit; font-weight: 600; color: var(--blue-900);
+  background: linear-gradient(180deg, var(--btn-top) 0%, var(--btn-bottom) 100%); border: 1px solid var(--blue-200); border-radius: 8px; box-shadow: 0 2px 0 var(--blue-200); cursor: pointer; }
+input[type="file"]::file-selector-button:hover { filter: brightness(1.04); }
+input[type="radio"], input[type="checkbox"], input[type="range"] { accent-color: var(--blue-700); }
+.check { display: flex; gap: 6px; align-items: center; margin: 8px 0 0; color: var(--ink); font-size: 13.5px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.chips label { margin: 0; display: inline-flex; gap: 4px; align-items: center; padding: 3px 9px; background: var(--surface); border: 1px solid var(--blue-200);
+  border-radius: 999px; color: var(--ink); font-size: 12.5px; cursor: pointer; }
+.chips label:has(input:checked) { background: var(--blue-100); border-color: var(--blue-600); color: var(--blue-900); font-weight: 600; }
+.rid { display: inline-block; min-width: 27px; padding: 0 4px; margin-right: 4px; border-radius: 5px; background: var(--blue-100); border: 1px solid var(--blue-200);
+  color: var(--blue-900); font: 700 10.5px/16px ui-monospace, Consolas, monospace; text-align: center; text-shadow: none; }
+.card-head .rid { background: rgba(255, 255, 255, 0.9); }
+.group { margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.group > .gt { font-size: 13px; font-weight: 700; color: var(--blue-900); margin: 2px 0 0; }
+.note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.warn { color: var(--warn); }
+.bad { color: var(--bad); }
+.okc { color: var(--ok); }
+.adv { margin-top: 10px; }
+.adv summary { padding: 4px 0; font-weight: 600; color: var(--blue-700); font-size: 12.5px; cursor: pointer; }
+summary { cursor: pointer; }
+.runbar { position: sticky; bottom: 0; z-index: 2; margin: 0 -14px; padding: 12px 14px 16px; display: grid; gap: 8px;
+  background: var(--bg); border-top: 1px solid var(--line); box-shadow: 0 -4px 12px rgba(47, 72, 88, 0.12); }
+.runbar .btns { display: flex; gap: 8px; }
+.runbar .btns button.primary { flex: 1; }
+
+/* ---------------------------------------------------------------- map and live panel */
+main { display: grid; grid-template-rows: 1fr 330px; min-width: 0; min-height: 0; }
+#map { min-height: 0; }
+.live { position: relative; background: var(--panel); border-top: 1px solid var(--line); display: grid; grid-template-rows: auto 1fr; min-height: 0;
+  box-shadow: 0 -3px 12px rgba(47, 72, 88, 0.12); }
+.livehead { display: flex; gap: 10px; align-items: center; padding: 7px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  background: linear-gradient(180deg, var(--surface-2), var(--blue-50)); }
+.stages { display: flex; gap: 6px; }
+.stage { padding: 2px 10px; border-radius: 999px; background: var(--blue-100); color: var(--blue-900); font-size: 12px; font-weight: 600; }
+.stage.on { color: #fff; background: linear-gradient(90deg, #33658A, #3f86ad); }
+.stage.done { background: color-mix(in srgb, var(--ok) 18%, var(--surface)); color: var(--ok); }
+.bar { flex: 1; min-width: 120px; height: 7px; background: var(--blue-100); border-radius: 4px; overflow: hidden; }
+.bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--blue-700), var(--blue-500)); transition: width .4s; }
+.tabs { display: flex; gap: 4px; margin-left: auto; }
+.tabs button { padding: 5px 12px; font-size: 13px; color: var(--muted); background: none; border: 1px solid transparent; box-shadow: none; border-radius: 8px; }
+.tabs button:hover:not(:disabled) { transform: none; box-shadow: none; color: var(--blue-900); background: var(--blue-100); }
+.tabs button.on { color: #fff; background: linear-gradient(180deg, #4a8bb3 0%, #33658A 100%); border-color: #2F4858; box-shadow: 0 2px 0 #2F4858; }
+.pane { overflow: auto; min-height: 0; display: none; }
+.pane.on { display: block; }
+#pane-table.on { display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+.tbar { display: flex; gap: 10px; align-items: center; padding: 6px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tbar .check { margin: 0; font-size: 12.5px; }
+.tbar .count { color: var(--muted); font-size: 12.5px; }
+.tbar .grow { flex: 1; }
+.twrap { overflow: auto; min-height: 0; position: relative; }
+table.out { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-width: 100%; }
+table.out th { position: sticky; top: 0; z-index: 1; text-align: left; font-weight: 700; padding: 6px 8px; color: var(--blue-900); white-space: nowrap;
+  background: linear-gradient(180deg, var(--blue-50), var(--blue-100)); border-bottom: 1px solid var(--blue-200); border-right: 1px solid var(--line);
+  cursor: pointer; user-select: none; }
+table.out th.dragover { box-shadow: inset 3px 0 0 var(--blue-700); }
+table.out th .sort { color: var(--blue-700); font-size: 10px; }
+table.out td { padding: 4px 8px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); white-space: nowrap; max-width: 380px;
+  overflow: hidden; text-overflow: ellipsis; }
+table.out td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.out tbody tr:hover td { background: var(--surface-2); }
+table.out tr.review td { background: var(--review); }
+table.out tr.review td:first-child { box-shadow: inset 3px 0 0 var(--orange); }
+table.out tr.sel td { background: var(--sel); }
+table.out tr.flash td { animation: flash 1.4s; }
+@keyframes flash { 0%, 40% { background: color-mix(in srgb, var(--blue-500) 45%, var(--surface)); } }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+#gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; padding: 10px 14px; }
+.thumb { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; background: var(--surface); box-shadow: 0 2px 6px rgba(47, 72, 88, 0.1); }
+.thumb img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--blue-50); }
+.thumb div { padding: 5px 7px; font-size: 11.5px; }
+.thumb b { font-size: 12.5px; color: var(--blue-900); }
+.thumb.fail { border-color: var(--bad); }
+.thumb.sus { border-color: var(--amber); }
+#log { margin: 0; padding: 10px 14px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
+#results { padding: 10px 14px; }
+.dl { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.dl a { padding: 5px 11px; border: 1px solid var(--blue-200); border-radius: 8px; color: var(--blue-900); font-weight: 600; text-decoration: none;
+  background: linear-gradient(180deg, var(--btn-top) 0%, var(--btn-bottom) 100%); box-shadow: 0 2px 0 var(--blue-200); }
+.legend { background: var(--surface); color: var(--ink); padding: 8px 11px; border-radius: 10px; border: 1px solid var(--line); font-size: 12.5px; line-height: 1.7;
+  box-shadow: 0 4px 12px rgba(47, 72, 88, 0.18); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.leaflet-container { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; }
+.leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface); color: var(--ink); }
+.leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+.leaflet-bar a, .leaflet-control-layers { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.leaflet-bar a:hover { background: var(--blue-50); color: var(--ink); }
+.leaflet-control-layers-toggle { background-color: var(--surface); }
+:root[data-theme="dark"] .leaflet-control-layers-toggle { filter: invert(0.85) hue-rotate(180deg); }
+.leaflet-control-attribution { background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--muted); }
+.leaflet-control-attribution a { color: var(--blue-700); }
+.leaflet-popup-content { font-size: 12.5px; min-width: 240px; color: var(--ink); }
+.leaflet-popup-content b { color: var(--blue-900); }
+.leaflet-popup-content img { width: 100%; border-radius: 8px; margin-top: 6px; }
+.leaflet-popup-content .plink { color: var(--blue-700); cursor: pointer; text-decoration: underline; }
+.ch-label { background: transparent; border: none; box-shadow: none; padding: 0 0 0 2px; font: 600 10.5px ui-monospace, Consolas, monospace;
+  color: var(--blue-900); text-shadow: 0 0 2px var(--halo), 0 0 2px var(--halo), 0 0 3px var(--halo); }
+.ch-label::before { display: none; }
+.empty { color: var(--muted); padding: 14px; }
+.menu { position: fixed; z-index: 2000; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(30, 48, 60, 0.28); padding: 4px; min-width: 200px; font-size: 13px; }
+.menu div { padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+.menu div:hover { background: var(--blue-50); color: var(--blue-900); }
+.menu .mh { color: #fff; font-size: 12px; font-weight: 700; cursor: default; margin: -4px -4px 4px; padding: 7px 12px; border-radius: 10px 10px 0 0;
+  background: var(--header-grad); }
+.menu .mh:hover { background: var(--header-grad); color: #fff; }
+.pop { position: absolute; z-index: 1500; right: 14px; top: 42px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 18px 50px rgba(30, 48, 60, 0.35); width: 280px; max-height: 270px; display: grid; grid-template-rows: auto 1fr auto; }
+.pop .ph { padding: 9px 12px; font-weight: 700; font-size: 13px; color: #fff; background: var(--header-grad); }
+.pop ul { list-style: none; margin: 0; padding: 6px; overflow: auto; }
+.pop li { display: flex; gap: 6px; align-items: center; padding: 4px 7px; margin-bottom: 3px; border-radius: 7px; font-size: 12.5px;
+  border: 1px solid transparent; }
+.pop li:hover { background: var(--blue-50); border-color: var(--line); }
+.pop li .grip { cursor: grab; color: var(--blue-600); }
+.pop li.dragover { box-shadow: inset 0 2px 0 var(--orange); }
+.pop .pf { padding: 8px 12px; border-top: 1px solid var(--line); display: flex; gap: 6px; justify-content: space-between; }
+@media (max-width: 900px) {
+  .app { height: auto; min-height: 100vh; }
+  .app-header { height: auto; padding: 10px 14px; flex-wrap: wrap; }
+  .page-title h3 { font-size: 19px; }
+  .app-body { grid-template-columns: 1fr; }
+  main { height: 90vh; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+<header class="app-header">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="12" y="0.5" width="8" height="31" rx="1.5" fill="#8a9aab"/><path d="M16 2.5v4M16 10.5v3M16 18.5v3M16 25.5v4" stroke="#ffffff" stroke-width="1.4"/><path d="M4.5 9.5v13M8.5 9.5v13M23.5 9.5v13M27.5 9.5v13" stroke="#55DDE0" stroke-width="2.2"/><path d="M1 12.5h30M1 19.5h30" stroke="#2F4858" stroke-width="2.4"/></svg>
+    <div class="brand-text">
+      <div class="page-title"><h3>Rail-Road Crossing Detection</h3></div>
+      <div class="tagline">Find road crossings on an alignment, measure them with SAM3, decide the structures.</div>
+    </div>
+  </div>
+  <div class="header-actions">
+    <button class="on-dark" id="hidePanel" title="Hide the inputs panel (more room for the map and table)">&#x276E; Hide inputs</button>
+    <button class="on-dark" id="themeBtn" title="Switch between the light and dark theme">&#x263E; Dark</button>
+    <a class="btn on-dark" href="/help" target="_blank" rel="noopener" title="Open the help documentation in a new tab">Help</a>
+  </div>
+</header>
+<div class="app-body">
+<aside class="sidebar">
+
+  <details class="card c-data" open>
+    <summary class="card-head"><span class="n">1</span><h4>Alignment</h4><span class="hint" id="alignHint"></span></summary>
+    <div class="body">
+      <label class="check"><input type="radio" name="src" value="default" checked> Default DFCC alignment</label>
+      <label class="check"><input type="radio" name="src" value="upload"> Upload a file (GeoJSON, KML, GPKG, zipped SHP)</label>
+      <div id="uploadBox" hidden>
+        <label>File</label>
+        <input type="file" id="file" accept=".geojson,.json,.kml,.kmz,.gpkg,.zip,.shp,.gml">
+        <div id="fileInfo" class="note"></div>
+        <div id="crsBox" hidden>
+          <label data-help="crs">Coordinate system (UTM zone)</label>
+          <select id="epsg"></select>
+          <p class="note">CAD exports often carry the wrong zone. Check the dashed preview lands where the line should be.</p>
+        </div>
+        <div id="filterBox" hidden>
+          <label data-help="filter">Use only these lines (CAD exports mix the alignment with labels)</label>
+          <div class="row">
+            <select id="field"></select>
+            <select id="value"></select>
+          </div>
+        </div>
+        <div id="previewInfo" class="note"></div>
+      </div>
+      <label data-help="start_chainage">Start chainage (m)</label>
+      <input type="number" id="startCh" step="0.001" value="0.000">
+      <p class="note">Chainage at the line's first vertex; it increases in the direction the line was drawn.</p>
+    </div>
+  </details>
+
+  <details class="card c-area" open>
+    <summary class="card-head"><span class="n">2</span><h4>Area and run name</h4></summary>
+    <div class="body">
+      <label class="check"><input type="radio" name="clip" value="state" checked> Clip to a state</label>
+      <label class="check"><input type="radio" name="clip" value="none"> Whole line, no clip</label>
+      <div id="stateBox"><label data-help="state">State</label><select id="state"></select></div>
+      <div class="row">
+        <div><label data-help="region">Run name</label><input type="text" id="region" placeholder="e.g. maharashtra_newline"></div>
+        <div><label data-help="id_prefix">Crossing ID prefix</label><input type="text" id="idPrefix" placeholder="auto"></div>
+      </div>
+      <div id="regionInfo" class="note"></div>
+      <label>Or open a finished run</label>
+      <div class="row"><select id="existing"><option value="">-</option></select><button id="openRun">Open</button></div>
+    </div>
+  </details>
+
+  <details class="card c-layers">
+    <summary class="card-head"><span class="n">3</span><h4>Crossing detection</h4><span class="hint">which crossings count</span></summary>
+    <div class="body">
+      <label data-k-help="identify.corridor_km">Road search corridor, each side of the line (km)</label>
+      <input type="number" step="0.1" data-k="identify.corridor_km" value="2">
+      <div class="row">
+        <div><label data-k-help="identify.min_angle_deg"><span class="rid">R10</span>Ignore roads crossing under (deg)</label>
+          <input type="number" step="1" data-k="identify.min_angle_deg" value="15"></div>
+        <div><label data-k-help="identify.junction_flag_m"><span class="rid">R6</span>Flag if a junction within (m)</label>
+          <input type="number" data-k="identify.junction_flag_m" value="50"></div>
+      </div>
+      <label data-k-help="identify.drop_classes"><span class="rid">R11</span>Road classes that never get a crossing</label>
+      <div class="chips" data-chips="identify.drop_classes" data-default="TRK"></div>
+      <div class="group">
+        <p class="gt">Road data</p>
+        <label class="check" data-k-help="identify.osm"><input type="checkbox" data-k="identify.osm" checked> Add OpenStreetMap roads where NIC has none</label>
+        <div class="row">
+          <div><label data-k-help="identify.osm_buffer_m">Same road if within (m)</label><input type="number" data-k="identify.osm_buffer_m" value="60"></div>
+          <div><label data-k-help="identify.osm_angle_deg">... and angle within (deg)</label><input type="number" data-k="identify.osm_angle_deg" value="20"></div>
+        </div>
+      </div>
+      <details class="adv"><summary>More</summary><div class="body">
+        <label data-k-help="identify.min_segment_m">Drop alignment slivers under (m)</label>
+        <input type="number" data-k="identify.min_segment_m" value="50">
+        <label data-k-help="extra">Extra arguments</label><input type="text" data-k="identify.extra" placeholder="--epsg 32644">
+      </div></details>
+    </div>
+  </details>
+
+  <details class="card c-match">
+    <summary class="card-head"><span class="n">4</span><h4>Nearby &amp; divided roads</h4></summary>
+    <div class="body">
+      <p class="note">Every rule that decides whether crossings close together are one road or one structure, nearest first.</p>
+      <div class="row">
+        <div><label data-k-help="identify.dual_merge_tol_m"><span class="rid">R5</span>Same route number: one crossing within (m)</label>
+          <input type="number" data-k="identify.dual_merge_tol_m" value="30"></div>
+        <div><label data-k-help="identify.nearby_crossing_flag_m"><span class="rid">R8</span>Flag another crossing within (m)</label>
+          <input type="number" data-k="identify.nearby_crossing_flag_m" value="40"></div>
+        <div><label data-k-help="structures.corridor_merge_m"><span class="rid">R9</span>One structure if roads within (m, edge to edge)</label>
+          <input type="number" data-k="structures.corridor_merge_m" value="20"></div>
+        <div><label data-k-help="structures.corridor_angle_deg"><span class="rid">R9</span>... and parallel within (deg)</label>
+          <input type="number" data-k="structures.corridor_angle_deg" value="15"></div>
+        <div><label data-k-help="structures.thin_m"><span class="rid">R12</span>Minor road diverted to a crossing within (m)</label>
+          <input type="number" data-k="structures.thin_m" value="100"></div>
+      </div>
+    </div>
+  </details>
+
+  <details class="card c-result">
+    <summary class="card-head"><span class="n">5</span><h4>Width measurement</h4><span class="hint">SAM3</span></summary>
+    <div class="body">
+      <div class="row">
+        <div><label data-k-help="measure.text">SAM3 prompt</label><input type="text" data-k="measure.text" value="road"></div>
+        <div><label data-k-help="measure.detect_threshold">Detection threshold</label><input type="number" step="0.05" data-k="measure.detect_threshold" value="0.4"></div>
+        <div><label data-k-help="measure.half_extent_m">Crop half-size (m)</label><input type="number" data-k="measure.half_extent_m" value="100"></div>
+        <div><label data-k-help="measure.limit">Only first N (test)</label><input type="number" data-k="measure.limit" placeholder="all"></div>
+      </div>
+      <label class="check" data-k-help="measure.surface"><input type="checkbox" data-k="measure.surface" checked> Judge paved / unpaved with SAM3</label>
+      <label class="check" data-k-help="measure.resume"><input type="checkbox" data-k="measure.resume"> Resume: skip crossings already measured</label>
+      <details class="adv"><summary>More</summary><div class="body">
+        <div class="row">
+          <div><label data-k-help="measure.surface_paved_margin">Paved margin</label><input type="number" step="0.01" data-k="measure.surface_paved_margin" value="0.05"></div>
+          <div><label data-k-help="measure.surface_unpaved_margin">Unpaved margin</label><input type="number" step="0.01" data-k="measure.surface_unpaved_margin" value="0.15"></div>
+          <div><label data-k-help="measure.fetch_workers">Download workers</label><input type="number" data-k="measure.fetch_workers" value="8"></div>
+          <div><label data-k-help="measure.cpu_workers">Measure workers</label><input type="number" data-k="measure.cpu_workers" value="3"></div>
+          <div><label data-k-help="measure.prefetch">Prefetch</label><input type="number" data-k="measure.prefetch" value="16"></div>
+          <div><label data-k-help="measure.checkpoint_every">Save every N</label><input type="number" data-k="measure.checkpoint_every" value="25"></div>
+        </div>
+        <label data-k-help="extra">Extra arguments</label><input type="text" data-k="measure.extra">
+      </div></details>
+    </div>
+  </details>
+
+  <details class="card c-struct">
+    <summary class="card-head"><span class="n">6</span><h4>Structure decision</h4><span class="hint">box, bridge or re-route</span></summary>
+    <div class="body">
+      <label data-k-help="structures.major_classes">Major roads: classes that always get a structure</label>
+      <div class="chips" data-chips="structures.major_classes" data-default="EXP,NH,SH,MDR,ODR"></div>
+      <div class="group">
+        <p class="gt"><span class="rid">S1</span>Minor roads</p>
+        <label data-k-help="structures.minor_rule">Minor road: keep or re-route by</label>
+        <select data-k="structures.minor_rule" id="minorRule">
+          <option value="spacing">Width and spacing (validated default)</option>
+          <option value="surface">Surface: keep if paved</option>
+        </select>
+        <div id="spacingBox" class="row">
+          <div><label data-k-help="structures.minor_keep_width_m">Re-route if narrower than (m)</label><input type="number" step="0.5" data-k="structures.minor_keep_width_m" value="4"></div>
+          <div><label data-k-help="structures.minor_divert_m">Divert if a major crossing within (m)</label><input type="number" data-k="structures.minor_divert_m" value="500"></div>
+        </div>
+        <div id="surfaceBox" hidden>
+          <label class="check" data-k-help="structures.keep_paved_minor"><input type="checkbox" data-k="structures.keep_paved_minor" checked> Keep paved minor roads</label>
+          <label data-k-help="structures.unknown_surface">Minor road, surface unknown</label>
+          <select data-k="structures.unknown_surface"><option value="keep">Keep</option><option value="reroute">Re-route</option></select>
+        </div>
+      </div>
+      <div class="group">
+        <p class="gt"><span class="rid">S5</span><span class="rid">S6</span>Opening and clearance</p>
+        <div class="row">
+          <div><label data-k-help="structures.edge_buffer_m">Buffer each side of the road (m)</label><input type="number" step="0.1" data-k="structures.edge_buffer_m" value="0"></div>
+          <div></div>
+          <div><label data-k-help="structures.clearance_m">Clearance, major road (m)</label><input type="number" step="0.1" data-k="structures.clearance_m" value="5.5"></div>
+          <div><label data-k-help="structures.minor_clearance_m">Clearance, kept minor road (m)</label><input type="number" step="0.1" data-k="structures.minor_clearance_m" value="4"></div>
+        </div>
+      </div>
+      <details class="adv"><summary>Review flags</summary><div class="body">
+        <div class="row">
+          <div><label data-k-help="structures.borderline_m">Borderline: opening within (m) of the largest box</label><input type="number" step="0.1" data-k="structures.borderline_m" value="0.5"></div>
+          <div><label data-k-help="structures.road_offset_flag_m">Road offset flag (m)</label><input type="number" data-k="structures.road_offset_flag_m" value="10"></div>
+          <div><label data-k-help="structures.class_check_width_m">Class check: minor road wider than (m)</label><input type="number" data-k="structures.class_check_width_m" value="7"></div>
+        </div>
+        <label data-k-help="extra">Extra arguments</label><input type="text" data-k="structures.extra">
+      </div></details>
+    </div>
+  </details>
+
+  <div class="runbar">
+    <div class="chips" id="steps">
+      <label><input type="checkbox" value="identify" checked> Find crossings</label>
+      <label><input type="checkbox" value="measure" checked> Measure widths</label>
+      <label><input type="checkbox" value="structures" checked> Decide structures</label>
+    </div>
+    <div class="btns"><button class="primary big" id="run">Run</button><button class="big" id="cancel" disabled>Cancel</button></div>
+    <div id="runMsg" class="note"></div>
+  </div>
+</aside>
+
+<main>
+  <div id="map"></div>
+  <section class="live">
+    <div class="livehead">
+      <div class="stages" id="stageChips"></div>
+      <div class="bar"><div id="barFill"></div></div>
+      <span id="progressText" class="note"></span>
+      <div class="tabs">
+        <button data-tab="table" class="on">Crossings</button>
+        <button data-tab="gallery">SAM3 results</button>
+        <button data-tab="log">Log</button>
+        <button data-tab="results">Downloads</button>
+      </div>
+    </div>
+    <div class="pane on" id="pane-table">
+      <div class="tbar">
+        <label class="check"><input type="checkbox" id="onlyReview"> Only those needing review</label>
+        <span class="count" id="tcount"></span>
+        <span class="grow"></span>
+        <span class="note">Right-click a row to find it on the map; right-click a crossing on the map to find its row.</span>
+        <button class="mini" id="colsBtn">Columns</button>
+      </div>
+      <div class="twrap" id="twrap"><div class="empty" id="tableEmpty">The crossings appear here once they are found.</div><table class="out" id="table" hidden><thead></thead><tbody></tbody></table></div>
+    </div>
+    <div class="pane" id="pane-gallery"><div id="gallery"></div><div class="empty" id="galleryEmpty">Each crossing's SAM3 crop appears here as it is measured.</div></div>
+    <div class="pane" id="pane-log"><pre id="log"></pre></div>
+    <div class="pane" id="pane-results"><div id="results"><div class="empty">Downloads appear here when a run finishes.</div></div></div>
+  </section>
+</main>
+</div>
+</div>
+
+<div class="menu" id="menu" hidden></div>
+<div class="pop" id="colsPop" hidden>
+  <div class="ph">Columns - tick to show, drag to reorder</div>
+  <ul id="colsList"></ul>
+  <div class="pf"><button class="mini" id="colsReset">Reset</button><button class="mini" id="colsClose">Close</button></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const STAGES = { identify: "Find crossings", measure: "Measure widths", structures: "Decide structures" };
+const TYPE_COLOR = { BRIDGE: "--bridge", BOX: "--box", DUAL_DESIGNER_DECISION: "--dual", PENDING_SURVEY: "--pending",
+                     NIL_REROUTE: "--reroute", MERGED: "--merged", NONE: "--none" };
+const TYPE_LABEL = { BRIDGE: "Bridge", BOX: "Box culvert", DUAL_DESIGNER_DECISION: "Divided road - designer decides",
+                     PENDING_SURVEY: "Width pending", NIL_REROUTE: "Re-route", MERGED: "Merged", NONE: "No structure" };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const blank = v => v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v));
+const fmt = (v, u = "") => blank(v) ? "-" : `${v}${u}`;
+// chainage as km+metres, e.g. 12+345.678 (to 3 decimals) or 12+300 for the map ticks
+function chain(m, dec = 3) {
+  if (blank(m)) return "-";
+  const neg = m < 0, a = Math.abs(Number(m)), km = Math.floor(a / 1000), r = a - km * 1000;
+  const rs = dec ? r.toFixed(dec).padStart(4 + dec, "0") : String(Math.round(r)).padStart(3, "0");
+  return `${neg ? "-" : ""}${km}+${rs}`;
+}
+
+// ------------------------------------------------------------------ help text (hover tips; the full help is /help)
+const HELP = {
+  crs: "The coordinate system of the uploaded file. CAD exports often carry the wrong UTM zone - pick the zone that puts the dashed preview where the line really is.",
+  filter: "CAD exports mix the alignment with labels, ticks and chainage text. Keep only the centreline layer (the longest is pre-selected).",
+  start_chainage: "Chainage, in metres (up to 3 decimals), at the first vertex of the alignment line. Chainage then increases in the direction the polyline was drawn, and crossing IDs are numbered in chainage order. With several lines, each starts at this value.",
+  state: "Only the part of the line inside this state is processed. Chainage is still measured from the start of the whole line, not from the state border.",
+  region: "Name for this run's files (output/<name>_*). Running Find crossings again under the same name overwrites them.",
+  id_prefix: "Prefix of the crossing IDs, e.g. MH-001. The number increases with chainage. Default: the state's code.",
+  "identify.corridor_km": "Roads are loaded this far either side of the alignment. Only roads that physically cross the line become crossings; the corridor just limits what is read.",
+  "identify.min_angle_deg": "R10 - a road meeting the line at less than this angle runs along it rather than across it, and is not a crossing. Designers built at only 4% of crossings under 15 deg.",
+  "identify.junction_flag_m": "R6 - flag a crossing that has a road junction within this distance (the structure may affect the junction).",
+  "identify.drop_classes": "R11 - road classes that never get a crossing. Default TRK (tracks): designers built at 19% of them.",
+  "identify.osm": "Add OpenStreetMap roads (Geofabrik extract) where the NIC road data has none. An OSM crossing that is the same road as a NIC one is dropped.",
+  "identify.osm_buffer_m": "An OSM crossing within this distance of a NIC crossing on the same alignment piece ...",
+  "identify.osm_angle_deg": "... and at a crossing angle within this many degrees of it, is the same road - the NIC one is kept.",
+  "identify.min_segment_m": "After clipping to the state, alignment pieces shorter than this (clip artefacts at the border) are dropped.",
+  "identify.dual_merge_tol_m": "R5 - two crossings this close that share a route number (e.g. both NH48) are the two carriageways of one divided road: one crossing.",
+  "identify.nearby_crossing_flag_m": "R8 - flag two crossings this close on the same alignment piece for review: often the same road mapped twice, or a parallel track.",
+  "structures.corridor_merge_m": "R9 - crossings whose roads lie within this distance of each other, edge to edge, as measured in the imagery, are one road corridor and get one structure over their combined width (two carriageways without a route number, a service road beside a highway).",
+  "structures.corridor_angle_deg": "R9 - only roads whose crossing angles differ by at most this much (roughly parallel) are merged.",
+  "structures.thin_m": "R12 - a minor road this close to a higher-ranked crossing is diverted to it (MERGED). Designers built at only 16-23% of crossings that close. 0 turns it off.",
+  "measure.text": "The concept SAM3 is asked to segment in each crop.",
+  "measure.detect_threshold": "SAM3 confidence needed to accept a road instance.",
+  "measure.half_extent_m": "Half the side of the imagery crop around each crossing.",
+  "measure.limit": "Measure only the first N crossings - for a quick test.",
+  "measure.surface": "Also judge paved / unpaved from the imagery ('asphalt road' vs 'dirt road' prompts).",
+  "measure.resume": "Skip crossings already measured in an earlier run of the same name. Earlier widths are matched by crossing location, so renumbered IDs never get the wrong width.",
+  "measure.surface_paved_margin": "Paved when the asphalt score beats the dirt score by at least this.",
+  "measure.surface_unpaved_margin": "Unpaved when the dirt score beats the asphalt score by at least this; in between is uncertain.",
+  "measure.fetch_workers": "Threads downloading imagery ahead of the GPU.",
+  "measure.cpu_workers": "Threads measuring widths while the GPU runs the next crop.",
+  "measure.prefetch": "How many crops to download ahead of the GPU.",
+  "measure.checkpoint_every": "Progress is saved every N crossings, so a stopped run can resume.",
+  "structures.major_classes": "These classes always get a structure (box or bridge). Every other class is a minor road, decided by S1.",
+  "structures.minor_rule": "S1 - how a minor road is kept or re-routed. Width and spacing (default, validated against the designers): kept if wide enough and no major-road crossing nearby to divert it to. Surface: kept if paved.",
+  "structures.minor_keep_width_m": "S1 - a minor road narrower than this (measured, combined width) is re-routed.",
+  "structures.minor_divert_m": "S1 - a minor road this close to a major-road crossing is diverted there.",
+  "structures.keep_paved_minor": "S1 surface rule - keep a minor road that is paved (imagery, else road data).",
+  "structures.unknown_surface": "S1 surface rule - what to do with a minor road whose surface neither the imagery nor the road data settles.",
+  "structures.edge_buffer_m": "Added on each side of the measured road width to give the opening width.",
+  "structures.clearance_m": "Vertical clearance a box must give a major road (box height). Organisation template: 5.5 m.",
+  "structures.minor_clearance_m": "Vertical clearance for a kept minor road. Organisation template: 4.0 m.",
+  "structures.borderline_m": "Flag BORDERLINE when the opening is this close to the largest standard box span (or the measurement's spread, if wider).",
+  "structures.road_offset_flag_m": "Flag ROAD_OFFSET when the road in the imagery meets the track this far from where the road data says.",
+  "structures.class_check_width_m": "Flag CLASS_CHECK on a minor road measured wider than this - it may be mis-classed in the road data.",
+  extra: "Further command-line arguments passed to the script as they are (see the script's --help).",
+};
+function applyHelp() {
+  for (const el of $$("[data-help]")) el.title = HELP[el.dataset.help] || "";
+  for (const el of $$("[data-k-help]")) {
+    const t = HELP[el.dataset.kHelp] || "";
+    el.title = t;
+    const ctl = el.nextElementSibling;
+    if (ctl && (ctl.matches("input,select,.chips"))) ctl.title = t;
+  }
+}
+
+// ------------------------------------------------------------------ theme
+const THEME_KEY = "rrcd.theme";
+function setTheme(t, save) {
+  document.documentElement.dataset.theme = t;
+  $("#themeBtn").innerHTML = t === "dark" ? "&#x2600; Light" : "&#x263E; Dark";
+  $("#themeBtn").title = t === "dark" ? "Switch to the light theme" : "Switch to the dark theme";
+  if (save) { try { localStorage.setItem(THEME_KEY, t); } catch (e) {} }
+}
+$("#themeBtn").onclick = () => {
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+  // colours already drawn were read from the old theme
+  layers.alignment.eachLayer(l => l.setStyle && l.setStyle({ color: css("--accent") }));
+  layers.alignment.eachLayer(l => l.eachLayer && l.eachLayer(x => x.setStyle && x.setStyle({ color: css("--accent") })));
+  for (const m of Object.values(markers)) {
+    const t = m.props.structure_type;
+    if (t) m.setStyle({ fillColor: css(TYPE_COLOR[t] || "--none") });
+    else if (m.props.decision === "no_crossing") m.setStyle({ fillColor: css("--none") });
+  }
+  renderTable();
+};
+setTheme(document.documentElement.dataset.theme || "light", false);
+
+// ------------------------------------------------------------------ panel
+function setPanel(open) {
+  $("#app").classList.toggle("collapsed", !open);
+  $("#hidePanel").innerHTML = open ? "&#x276E; Hide inputs" : "&#x276F; Show inputs";
+  $("#hidePanel").title = open ? "Hide the inputs panel (more room for the map and table)" : "Show the inputs panel";
+  setTimeout(() => map.invalidateSize(), 50);
+}
+$("#hidePanel").onclick = () => setPanel($("#app").classList.contains("collapsed"));
+
+// ------------------------------------------------------------------ map
+const map = L.map("map", { preferCanvas: true }).setView([21.5, 80], 5);
+const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(map);
+const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Esri World Imagery" });
+const layers = { preview: L.layerGroup().addTo(map), alignment: L.layerGroup().addTo(map), chainage: L.layerGroup().addTo(map),
+                 crossings: L.layerGroup().addTo(map), structures: L.layerGroup().addTo(map), widths: L.layerGroup().addTo(map) };
+L.control.layers({ Map: osm, Satellite: sat }, { "Alignment": layers.alignment, "Chainage": layers.chainage,
+  "Crossings": layers.crossings, "Structures": layers.structures, "Width lines": layers.widths }, { collapsed: true }).addTo(map);
+const legend = L.control({ position: "bottomright" });
+legend.onAdd = () => { const d = L.DomUtil.create("div", "legend"); d.id = "legend"; d.hidden = true; return d; };
+legend.addTo(map);
+const markers = {};   // crossing_id -> circle marker
+let region = null, ROWS = [];
+
+function crossingPopup(p) {
+  const rows = [["Chainage", chain(p.chainage_m)], ["Road", `${fmt(p.irc_class || p.Assumed_irc_class)} ${p.road_source ? "(" + p.road_source + ")" : ""}`],
+    ["Decision", `${fmt(p.decision)} ${p.rule ? "(" + p.rule + ")" : ""}`], ["Angle", fmt(p.angle_deg, "&deg;")],
+    ["Width", fmt(p.measured_width_m, " m")], ["Surface", fmt(p.road_surface)], ["Structure", fmt(TYPE_LABEL[p.structure_type] || p.structure_type)],
+    ["Box", fmt(p.box_size)], ["Opening", fmt(p.opening_width_m, " m")], ["Span", fmt(p.span_m, " m")],
+    ["Clearance", fmt(p.clearance_m, " m")], ["Flags", fmt(p.structure_flags)]].filter(r => r[1] !== "-" && r[1].trim() !== "-");
+  const why = reviewReasons(p);
+  return `<b>${esc(p.crossing_id)}</b> &middot; <span class="plink" onclick="focusRow('${esc(p.crossing_id)}')">show in table</span><br>` +
+    rows.map(r => `${r[0]}: ${r[1]}`).join("<br>") +
+    (why.length ? `<br><span class="warn">Needs review: ${esc(why.join("; "))}</span>` : "") +
+    (p.structure_reason ? `<br><span style="color:var(--muted)">${esc(p.structure_reason)}</span>` : "") +
+    `<img src="/api/qa/${region}/${encodeURIComponent(p.crossing_id)}?t=${Date.now()}" onerror="this.remove()">`;
+}
+
+async function loadLayer(kind) {
+  const r = await fetch(`/api/layer/${region}/${kind}`);
+  if (!r.ok) return null;
+  return r.json();
+}
+
+async function showAlignment() {
+  const gj = await loadLayer("alignment");
+  layers.alignment.clearLayers();
+  if (!gj) return;
+  const l = L.geoJSON(gj, { style: { color: css("--accent"), weight: 4, opacity: .85 } }).addTo(layers.alignment);
+  layers.preview.clearLayers();
+  try { map.fitBounds(l.getBounds(), { padding: [20, 20] }); } catch (e) {}
+  await loadChainage();
+}
+
+// ---- chainage ticks: every 100 m from zoom 15, coarser further out, only inside the view
+let TICKS = [];
+async function loadChainage() {
+  TICKS = [];
+  const r = await fetch(`/api/chainage/${region}?step=100`);
+  if (r.ok) TICKS = (await r.json()).features.map(f => ({ ll: [f.geometry.coordinates[1], f.geometry.coordinates[0]], ch: f.properties.chainage_m }));
+  drawTicks();
+}
+function drawTicks() {
+  layers.chainage.clearLayers();
+  const z = map.getZoom();
+  const every = z >= 15 ? 100 : z >= 14 ? 500 : z >= 12 ? 1000 : z >= 10 ? 5000 : 0;
+  if (!every || !TICKS.length) return;
+  const b = map.getBounds().pad(0.1);
+  let n = 0;
+  for (const t of TICKS) {
+    if (Math.abs(t.ch / every - Math.round(t.ch / every)) > 1e-6 || !b.contains(t.ll)) continue;
+    if (++n > 600) break;
+    L.circleMarker(t.ll, { radius: 2.5, color: "#1d2330", weight: 1, fillColor: "#ffffff", fillOpacity: 1, interactive: false })
+      .bindTooltip(chain(t.ch, 0), { permanent: true, direction: "right", className: "ch-label", offset: [3, 0] })
+      .addTo(layers.chainage);
+  }
+}
+map.on("zoomend moveend", drawTicks);
+
+function markerStyle(color, r = 6) { return { radius: r, color: "#1d2330", weight: 1, fillColor: color, fillOpacity: .92 }; }
+function bindMarker(m, p) {
+  m.bindPopup(() => crossingPopup(p), { maxWidth: 360 });
+  m.on("contextmenu", e => {
+    L.DomEvent.preventDefault(e.originalEvent);
+    showMenu(e.originalEvent, p.crossing_id, [["Show in table", () => focusRow(p.crossing_id)], ["Open details", () => m.openPopup()]]);
+  });
+  m.props = p;
+  markers[p.crossing_id] = m;
+}
+
+async function showCrossings(kind = "crossings") {
+  const gj = await loadLayer(kind);
+  if (!gj) return;
+  layers.crossings.clearLayers();
+  for (const k in markers) delete markers[k];
+  for (const f of gj.features) {
+    const p = f.properties, [x, y] = f.geometry.coordinates;
+    const live = p.decision !== "no_crossing";
+    const color = !live ? css("--none") : p.measured_width_m != null ? css("--ok") : css("--reroute");
+    const m = L.circleMarker([y, x], markerStyle(color, live ? 6 : 4));
+    bindMarker(m, p); m.addTo(layers.crossings);
+  }
+  setRows(gj.features.map(f => f.properties), kind !== "crossings");
+}
+
+async function showStructures() {
+  const gj = await loadLayer("structures");
+  if (!gj) return;
+  layers.crossings.clearLayers(); layers.structures.clearLayers();
+  for (const k in markers) delete markers[k];
+  const counts = {};
+  for (const f of gj.features) {
+    const p = f.properties, t = p.structure_type || "NONE", [x, y] = f.geometry.coordinates;
+    counts[t] = (counts[t] || 0) + 1;
+    const big = ["BRIDGE", "BOX", "DUAL_DESIGNER_DECISION", "PENDING_SURVEY"].includes(t);
+    const m = L.circleMarker([y, x], markerStyle(css(TYPE_COLOR[t] || "--none"), big ? 7 : 4));
+    bindMarker(m, p); m.addTo(layers.structures);
+  }
+  const lg = $("#legend"); lg.hidden = false;
+  lg.innerHTML = Object.keys(TYPE_LABEL).filter(t => counts[t]).map(t => `<i style="background:${css(TYPE_COLOR[t])}"></i>${TYPE_LABEL[t]} (${counts[t]})`).join("<br>");
+  const w = await loadLayer("geometry");
+  layers.widths.clearLayers();
+  if (w) L.geoJSON(w, { style: { color: css("--warn"), weight: 3 } }).addTo(layers.widths);
+  setRows(gj.features.map(f => f.properties), true);
+}
+
+function zoomTo(cid) {
+  const mk = markers[cid];
+  if (!mk) return;
+  map.setView(mk.getLatLng(), Math.max(map.getZoom(), 17));
+  mk.openPopup();
+}
+
+// ------------------------------------------------------------------ output table
+// Which crossings need someone to look at them, and why
+const REVIEW_FLAGS = { SUSPECT_WIDTH: "width suspect - check the QA crop", BORDERLINE: "opening close to the largest box",
+  ROAD_OFFSET: "road in imagery away from road data", DUAL_MISMATCH: "divided road? road data and imagery disagree",
+  CLASS_CHECK: "minor road wider than its class", LAYOUT_APPROX: "combined layout approximate", NEARBY_CROSSING: "another crossing close by (R8)" };
+let MEASURED = false;   // the rows come from after the measurement step
+function reviewReasons(p) {
+  const r = [];
+  if (p.structure_type === "PENDING_SURVEY") r.push("no width - survey it");
+  if (p.structure_type === "DUAL_DESIGNER_DECISION") r.push("divided road - designer decides");
+  for (const f of String(p.structure_flags || "").split(";")) if (REVIEW_FLAGS[f]) r.push(REVIEW_FLAGS[f]);
+  if (!p.structure_type && p.decision !== "no_crossing") {
+    if (MEASURED && blank(p.measured_width_m)) r.push("no width measured");
+    if (/SUSPECT/.test(p.width_source || "")) r.push(REVIEW_FLAGS.SUSPECT_WIDTH);
+    if (!blank(p.nearby_crossing_id)) r.push(REVIEW_FLAGS.NEARBY_CROSSING);
+  }
+  return r;
+}
+
+// every column the table can show; `on` is the default shown / hidden state
+const COLS = [
+  { k: "crossing_id", t: "Crossing ID", on: true },
+  { k: "chainage_m", t: "Chainage", on: true, f: v => chain(v), num: true },
+  { k: "section_id", t: "Section", on: false },
+  { k: "irc_class", t: "Road class", on: true },
+  { k: "name", t: "Road name", on: false },
+  { k: "road_source", t: "Road data", on: false },
+  { k: "angle_deg", t: "Crossing angle (deg)", on: true, num: true },
+  { k: "skew_angle_deg", t: "Skew (deg)", on: false, num: true },
+  { k: "measured_width_m", t: "Measured width (m)", on: true, num: true },
+  { k: "combined_layout_m", t: "Road layout (m)", on: false },
+  { k: "road_surface", t: "Surface", on: true },
+  { k: "structure_type", t: "Structure", on: true, f: (v, p) => blank(v) ? "-" :
+      `<span class="swatch" style="background:${css(TYPE_COLOR[v] || "--none")}"></span>${esc(TYPE_LABEL[v] || v)}` , html: true },
+  { k: "box_size", t: "Box size", on: true },
+  { k: "opening_width_m", t: "Opening (m)", on: true, num: true },
+  { k: "span_m", t: "Span along track (m)", on: true, num: true },
+  { k: "clearance_m", t: "Clearance (m)", on: false, num: true },
+  { k: "_review", t: "Needs review", on: true },
+  { k: "structure_flags", t: "Flags", on: false },
+  { k: "merged_into", t: "Merged into", on: false },
+  { k: "decision", t: "Decision", on: false },
+  { k: "rule", t: "Rule", on: false },
+  { k: "structure_rule", t: "Structure rule", on: false },
+  { k: "nearest_major_crossing_m", t: "Nearest major crossing (m)", on: false, num: true },
+  { k: "width_source", t: "Width source", on: false },
+  { k: "structure_reason", t: "Reason", on: false },
+];
+const COLKEY = "rrcd.columns.v1";
+// crossing IDs are numbered in chainage order, line by line - chainage alone restarts on every line
+let colState = loadCols(), sortBy = { k: "crossing_id", dir: 1 };
+function loadCols() {
+  const def = { order: COLS.map(c => c.k), on: Object.fromEntries(COLS.map(c => [c.k, c.on])) };
+  try {
+    const s = JSON.parse(localStorage.getItem(COLKEY) || "null");
+    if (s && Array.isArray(s.order)) {
+      const known = COLS.map(c => c.k);
+      s.order = s.order.filter(k => known.includes(k)).concat(known.filter(k => !s.order.includes(k)));
+      s.on = { ...def.on, ...s.on };
+      return s;
+    }
+  } catch (e) {}
+  return def;
+}
+function saveCols() { try { localStorage.setItem(COLKEY, JSON.stringify(colState)); } catch (e) {} }
+const colDef = k => COLS.find(c => c.k === k);
+const visibleCols = () => colState.order.filter(k => colState.on[k]).map(colDef);
+
+function setRows(rows, measured) {
+  MEASURED = measured;
+  ROWS = rows.map(p => ({ ...p, _review: reviewReasons(p).join("; ") }));
+  renderTable();
+}
+function cell(c, p) {
+  const v = p[c.k];
+  if (c.f) return c.html ? c.f(v, p) : esc(c.f(v, p));
+  return esc(blank(v) ? "-" : v);
+}
+function renderTable() {
+  const tbl = $("#table");
+  $("#tableEmpty").hidden = ROWS.length > 0; tbl.hidden = !ROWS.length;
+  if (!ROWS.length) { $("#tcount").textContent = ""; return; }
+  const only = $("#onlyReview").checked;
+  let rows = only ? ROWS.filter(p => p._review) : ROWS.slice();
+  const { k, dir } = sortBy;
+  rows.sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (blank(x) && blank(y)) return 0; if (blank(x)) return 1; if (blank(y)) return -1;
+    return (typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true })) * dir;
+  });
+  const cols = visibleCols();
+  tbl.tHead.innerHTML = "<tr>" + cols.map(c => `<th draggable="true" data-k="${c.k}" title="Click to sort, drag to move">${esc(c.t)}` +
+    (c.k === k ? ` <span class="sort">${dir > 0 ? "&#9650;" : "&#9660;"}</span>` : "") + "</th>").join("") + "</tr>";
+  tbl.tBodies[0].innerHTML = rows.map(p => `<tr data-cid="${esc(p.crossing_id)}" class="${p._review ? "review" : ""}">` +
+    cols.map(c => `<td class="${c.num ? "num" : ""}"${c.k === "_review" || c.k === "structure_reason" ? ` title="${esc(p[c.k])}"` : ""}>${cell(c, p)}</td>`).join("") + "</tr>").join("");
+  const nrev = ROWS.filter(p => p._review).length;
+  $("#tcount").innerHTML = `${rows.length} of ${ROWS.length} crossing(s)` + (nrev ? ` &middot; <span class="warn">${nrev} need review</span>` : "");
+  wireHeader();
+}
+$("#onlyReview").onchange = renderTable;
+
+function wireHeader() {
+  let dragK = null;
+  for (const th of $$("#table th")) {
+    th.onclick = () => { sortBy = { k: th.dataset.k, dir: sortBy.k === th.dataset.k ? -sortBy.dir : 1 }; renderTable(); };
+    th.ondragstart = e => { dragK = th.dataset.k; e.dataTransfer.effectAllowed = "move"; };
+    th.ondragover = e => { e.preventDefault(); th.classList.add("dragover"); };
+    th.ondragleave = () => th.classList.remove("dragover");
+    th.ondrop = e => { e.preventDefault(); th.classList.remove("dragover"); moveCol(dragK, th.dataset.k); };
+  }
+}
+function moveCol(from, to) {
+  if (!from || from === to) return;
+  const o = colState.order.filter(k => k !== from);
+  o.splice(o.indexOf(to), 0, from);
+  colState.order = o; saveCols(); renderTable(); if (!$("#colsPop").hidden) renderColsList();
+}
+
+// row selection, right-click menu
+let selCid = null;
+function selectRow(cid) {
+  selCid = cid;
+  for (const tr of $$("#table tbody tr")) tr.classList.toggle("sel", tr.dataset.cid === cid);
+}
+$("#table").addEventListener("click", e => { const tr = e.target.closest("tbody tr"); if (tr) selectRow(tr.dataset.cid); });
+$("#table").addEventListener("dblclick", e => { const tr = e.target.closest("tbody tr"); if (tr) zoomTo(tr.dataset.cid); });
+$("#table").addEventListener("contextmenu", e => {
+  const tr = e.target.closest("tbody tr"); if (!tr) return;
+  e.preventDefault(); selectRow(tr.dataset.cid);
+  const cid = tr.dataset.cid;
+  showMenu(e, cid, [["Zoom to it on the map", () => zoomTo(cid)], ["Copy crossing ID", () => navigator.clipboard?.writeText(cid)]]);
+});
+function focusRow(cid) {
+  $$(".tabs button").find(b => b.dataset.tab === "table").click();
+  let tr = $(`#table tbody tr[data-cid="${CSS.escape(cid)}"]`);
+  if (!tr && $("#onlyReview").checked) { $("#onlyReview").checked = false; renderTable(); tr = $(`#table tbody tr[data-cid="${CSS.escape(cid)}"]`); }
+  if (!tr) return;
+  selectRow(cid);
+  tr.scrollIntoView({ block: "center" });
+  tr.classList.remove("flash"); void tr.offsetWidth; tr.classList.add("flash");
+}
+window.focusRow = focusRow;
+
+function showMenu(ev, title, items) {
+  const m = $("#menu");
+  m.innerHTML = `<div class="mh">${esc(title)}</div>` + items.map((it, i) => `<div data-i="${i}">${esc(it[0])}</div>`).join("");
+  m.hidden = false;
+  const x = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8), y = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8);
+  m.style.left = x + "px"; m.style.top = y + "px";
+  m.onclick = e => { const d = e.target.closest("[data-i]"); if (!d) return; m.hidden = true; items[+d.dataset.i][1](); };
+}
+document.addEventListener("click", e => { if (!e.target.closest("#menu")) $("#menu").hidden = true; });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { $("#menu").hidden = true; $("#colsPop").hidden = true; } });
+window.addEventListener("blur", () => $("#menu").hidden = true);
+
+// column chooser
+function renderColsList() {
+  let dragK = null;
+  $("#colsList").innerHTML = colState.order.map(k => `<li draggable="true" data-k="${k}"><span class="grip">&#x2630;</span>` +
+    `<input type="checkbox" ${colState.on[k] ? "checked" : ""}> ${esc(colDef(k).t)}</li>`).join("");
+  for (const li of $$("#colsList li")) {
+    li.querySelector("input").onchange = e => { colState.on[li.dataset.k] = e.target.checked; saveCols(); renderTable(); };
+    li.ondragstart = e => { dragK = li.dataset.k; e.dataTransfer.effectAllowed = "move"; };
+    li.ondragover = e => { e.preventDefault(); li.classList.add("dragover"); };
+    li.ondragleave = () => li.classList.remove("dragover");
+    li.ondrop = e => { e.preventDefault(); li.classList.remove("dragover"); moveCol(dragK, li.dataset.k); };
+  }
+}
+$("#colsBtn").onclick = e => { e.stopPropagation(); const p = $("#colsPop"); p.hidden = !p.hidden; if (!p.hidden) renderColsList(); };
+$("#colsClose").onclick = () => $("#colsPop").hidden = true;
+$("#colsReset").onclick = () => { try { localStorage.removeItem(COLKEY); } catch (e) {} colState = loadCols(); renderColsList(); renderTable(); };
+document.addEventListener("click", e => { if (!e.target.closest("#colsPop") && e.target.id !== "colsBtn") $("#colsPop").hidden = true; });
+document.querySelector(".live").style.position = "relative";
+document.querySelector(".live").appendChild($("#colsPop"));
+
+// ------------------------------------------------------------------ form
+function chips() {
+  for (const el of $$("[data-chips]")) {
+    const on = el.dataset.default.split(",");
+    el.innerHTML = META.classes.map(c => `<label><input type="checkbox" value="${c}" ${on.includes(c) ? "checked" : ""}> ${c}</label>`).join("");
+  }
+}
+function collect() {
+  const cfg = { identify: {}, measure: {}, structures: {} };
+  for (const el of $$("[data-k]")) {
+    const [grp, k] = el.dataset.k.split(".");
+    let v = el.type === "checkbox" ? el.checked : el.value.trim();
+    if (el.type === "number" && v !== "") v = Number(v);
+    if (v === "") continue;
+    cfg[grp][k] = v;
+  }
+  for (const el of $$("[data-chips]")) {
+    const [grp, k] = el.dataset.chips.split(".");
+    cfg[grp][k] = [...el.querySelectorAll("input:checked")].map(i => i.value);
+  }
+  if (cfg.structures.minor_rule === "spacing") { delete cfg.structures.keep_paved_minor; delete cfg.structures.unknown_surface; }
+  const src = $("input[name=src]:checked").value;
+  if (src === "upload") {
+    if (!UPLOAD) throw new Error("upload an alignment file first");
+    Object.assign(cfg, { file: UPLOAD.file, field: $("#field").value || null, value: $("#value").value || null,
+                         epsg: $("#epsg").value ? Number($("#epsg").value) : null });
+  }
+  const sc = $("#startCh").value.trim();
+  if (sc !== "" && !/^-?\d+(\.\d{1,3})?$/.test(sc)) throw new Error("start chainage: metres, up to 3 decimals");
+  cfg.start_chainage_m = sc === "" ? 0 : Number(sc);
+  cfg.clip = $("input[name=clip]:checked").value;
+  cfg.state = $("#state").value;
+  cfg.region = $("#region").value.trim();
+  cfg.id_prefix = $("#idPrefix").value.trim();
+  cfg.steps = [...$$("#steps input:checked")].map(i => i.value);
+  return cfg;
+}
+
+let META, UPLOAD = null;
+async function init() {
+  META = await (await fetch("/api/meta")).json();
+  $("#state").innerHTML = META.states.map(s => `<option>${esc(s)}</option>`).join("");
+  chips();
+  applyHelp();
+  const regs = await (await fetch("/api/regions")).json();
+  $("#existing").innerHTML = `<option value="">-</option>` + regs.map(r => `<option>${r}</option>`).join("");
+  if (META.busy) { attach(); }
+}
+
+$$("input[name=src]").forEach(r => r.onchange = () => {
+  const up = $("input[name=src]:checked").value === "upload";
+  $("#uploadBox").hidden = !up;
+  layers.preview.clearLayers();
+  if (up) preview();
+  suggestName();
+});
+$$("input[name=clip]").forEach(r => r.onchange = () => { $("#stateBox").hidden = $("input[name=clip]:checked").value !== "state"; suggestName(); });
+$("#state").onchange = suggestName;
+$("#minorRule").onchange = () => { const s = $("#minorRule").value === "spacing"; $("#spacingBox").hidden = !s; $("#surfaceBox").hidden = s; };
+$$(".tabs button").forEach(b => b.onclick = () => {
+  $$(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  $$(".pane").forEach(p => p.classList.toggle("on", p.id === "pane-" + b.dataset.tab));
+});
+$("#startCh").onblur = () => { const v = $("#startCh").value.trim(); if (v !== "" && !isNaN(Number(v))) $("#startCh").value = Number(v).toFixed(3); };
+
+let nameTouched = false;
+$("#region").oninput = () => { nameTouched = true; checkRegion(); };
+function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""); }
+function suggestName() {
+  if (nameTouched) return;
+  const st = $("input[name=clip]:checked").value === "state" ? slug($("#state").value) : "";
+  const fn = UPLOAD && $("input[name=src]:checked").value === "upload" ? slug(UPLOAD.name.replace(/\.[^.]+$/, "")).slice(0, 24) : "";
+  $("#region").value = [st, fn].filter(Boolean).join("_") || "";
+  checkRegion();
+}
+let regionTimer;
+function checkRegion() {
+  clearTimeout(regionTimer);
+  regionTimer = setTimeout(async () => {
+    const r = $("#region").value.trim();
+    if (!r) { $("#regionInfo").textContent = ""; return; }
+    const s = await (await fetch(`/api/region/${encodeURIComponent(r)}`)).json();
+    $("#idPrefix").placeholder = s.id_prefix;
+    $("#regionInfo").innerHTML = s.crossings
+      ? `<span class="warn">"${esc(s.region)}" already has results - running "Find crossings" again overwrites them.</span>`
+      : `Files will be named <b>${esc(s.region)}_*</b>; crossing IDs ${esc($("#idPrefix").value || s.id_prefix)}-001... in chainage order`;
+  }, 250);
+}
+
+$("#file").onchange = async () => {
+  const f = $("#file").files[0]; if (!f) return;
+  $("#fileInfo").textContent = "Reading " + f.name + "...";
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch("/api/upload", { method: "POST", body: fd });
+  const d = await r.json();
+  if (!r.ok) { $("#fileInfo").innerHTML = `<span class="bad">${esc(d.detail)}</span>`; return; }
+  UPLOAD = d;
+  $("#fileInfo").innerHTML = `${d.n} line feature(s), ${esc(d.crs || "no CRS - read as lat/lon")}` +
+    (d.in_india ? "" : `<br><span class="warn">With this CRS the line isn't in India - the CRS label is probably wrong.</span>`);
+  $("#crsBox").hidden = !d.crs_suggestions.length;
+  $("#epsg").innerHTML = `<option value="">As labelled: ${esc(d.crs)}</option>` + d.crs_suggestions.map(e => `<option value="${e}">Treat as EPSG:${e} (UTM ${e - 32600}N)</option>`).join("");
+  if (!d.in_india && d.crs_suggestions.length) $("#epsg").value = d.crs_suggestions[0];
+  $("#filterBox").hidden = !d.fields.length;
+  $("#field").innerHTML = `<option value="">All lines</option>` + d.fields.map(f => `<option>${esc(f.field)}</option>`).join("");
+  const best = d.fields.find(f => /layer|feature_type|type/i.test(f.field));
+  if (best) $("#field").value = best.field;
+  fillValues(); suggestName(); preview();
+};
+function fillValues() {
+  const f = UPLOAD?.fields.find(x => x.field === $("#field").value);
+  $("#value").innerHTML = f ? f.values.map(v => `<option value="${esc(v.value)}">${esc(v.value)} (${v.n}${v.km != null ? ", " + v.km + " km" : ""})</option>`).join("") : "";
+  $("#value").disabled = !f;
+  if (f) { const longest = f.values.filter(v => v.km != null).sort((a, b) => b.km - a.km)[0]; if (longest) $("#value").value = longest.value; }
+}
+$("#field").onchange = () => { fillValues(); preview(); };
+$("#value").onchange = preview;
+$("#epsg").onchange = preview;
+
+async function preview() {
+  if (!UPLOAD) return;
+  const q = new URLSearchParams({ file: UPLOAD.file });
+  if ($("#field").value) { q.set("field", $("#field").value); q.set("value", $("#value").value); }
+  if ($("#epsg").value) q.set("epsg", $("#epsg").value);
+  const r = await fetch("/api/preview?" + q); const d = await r.json();
+  layers.preview.clearLayers();
+  if (!r.ok) { $("#previewInfo").innerHTML = `<span class="bad">${esc(d.detail)}</span>`; return; }
+  if (!d.in_india) { $("#previewInfo").innerHTML = `<span class="warn">Still outside India - pick another CRS.</span>`; return; }
+  const l = L.geoJSON(d.geojson, { style: { color: css("--accent"), weight: 4, dashArray: "6 4" } }).addTo(layers.preview);
+  map.fitBounds(l.getBounds(), { padding: [20, 20] });
+  $("#previewInfo").innerHTML = `<span class="okc">${d.n} line(s), ${d.km} km</span> through ` +
+    (d.states.map(s => `${esc(s.state)} ${s.km} km`).join(", ") || "no state in the boundary file");
+  $("#alignHint").textContent = `${d.km} km`;
+  if (d.states.length && META.states.includes(d.states[0].state)) { $("#state").value = d.states[0].state; suggestName(); }
+}
+
+$("#openRun").onclick = async () => {
+  const r = $("#existing").value; if (!r) return;
+  region = r; resetLive();
+  await showAlignment();
+  const s = await (await fetch(`/api/region/${r}`)).json();
+  if (s.structures) await showStructures(); else await showCrossings(s.final ? "final" : "crossings");
+  showDownloads(s.downloads);
+  $$(".tabs button").find(b => b.dataset.tab === "table").click();
+};
+
+// ------------------------------------------------------------------ run + live
+let logNext = 0, measNext = 0, poll = null, doneStages = [];
+function resetLive() {
+  logNext = measNext = 0; doneStages = [];
+  $("#log").textContent = ""; $("#gallery").innerHTML = ""; $("#galleryEmpty").hidden = false;
+  $("#barFill").style.width = "0"; $("#progressText").textContent = "";
+  layers.structures.clearLayers(); layers.widths.clearLayers(); layers.crossings.clearLayers(); layers.chainage.clearLayers(); $("#legend").hidden = true;
+  TICKS = []; setRows([], false);
+}
+
+$("#run").onclick = async () => {
+  let cfg;
+  try { cfg = collect(); } catch (e) { $("#runMsg").innerHTML = `<span class="bad">${esc(e.message)}</span>`; return; }
+  const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) });
+  const d = await r.json();
+  if (!r.ok) { $("#runMsg").innerHTML = `<span class="bad">${esc(d.detail)}</span>`; return; }
+  region = d.region; resetLive();
+  $("#runMsg").textContent = `Running ${d.steps.map(s => STAGES[s]).join(" > ")} for ${d.region}`;
+  attach();
+};
+$("#cancel").onclick = () => fetch("/api/cancel", { method: "POST" });
+
+function attach() { clearInterval(poll); poll = setInterval(tick, 1200); tick(); }
+
+async function tick() {
+  const j = await (await fetch(`/api/job?log_from=${logNext}&meas_from=${measNext}`)).json();
+  if (j.status === "idle") { clearInterval(poll); return; }
+  if (!region) region = j.region;
+  $("#run").disabled = j.status === "running"; $("#cancel").disabled = j.status !== "running";
+  $("#stageChips").innerHTML = j.steps.map(s => `<span class="stage ${j.stages_done.includes(s) ? "done" : s === j.stage ? "on" : ""}">${STAGES[s] || s}</span>`).join("");
+  if (j.log.length) {
+    const pre = $("#log"), atEnd = pre.parentElement.scrollTop + pre.parentElement.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent += j.log.join("\n") + "\n"; logNext = j.log_next;
+    if (atEnd) pre.parentElement.scrollTop = pre.scrollHeight;
+  }
+  if (j.progress) {
+    const [n, t] = j.progress; $("#barFill").style.width = t ? `${100 * n / t}%` : "0";
+    $("#progressText").textContent = `${n} / ${t} measured`;
+  }
+  for (const m of j.measured) addCard(m);
+  measNext = j.meas_next;
+  for (const s of j.stages_done) if (!doneStages.includes(s)) { doneStages.push(s); await onStageDone(s); }
+  if (j.status !== "running") {
+    clearInterval(poll);
+    $("#runMsg").innerHTML = j.status === "done" ? `<span class="okc">Finished in ${Math.round(j.elapsed_s / 60)} min.</span>`
+      : j.status === "cancelled" ? `<span class="warn">Cancelled.</span>` : `<span class="bad">${esc(j.error)}</span>`;
+    const s = await (await fetch(`/api/region/${region}`)).json();
+    showDownloads(s.downloads);
+    const regs = await (await fetch("/api/regions")).json();
+    $("#existing").innerHTML = `<option value="">-</option>` + regs.map(r => `<option>${r}</option>`).join("");
+  }
+}
+
+async function onStageDone(s) {
+  if (s === "identify") { await showAlignment(); await showCrossings("crossings"); }
+  if (s === "measure") await showCrossings("final");
+  if (s === "structures") await showStructures();
+}
+
+function addCard(m) {
+  $("#galleryEmpty").hidden = true;
+  const c = document.createElement("div");
+  c.className = "thumb" + (m.ok ? (m.suspect ? " sus" : "") : " fail");
+  c.innerHTML = `<img loading="lazy" src="/api/qa/${region}/${encodeURIComponent(m.cid)}?t=${Date.now()}" alt="">
+    <div><b>${esc(m.cid)}</b><br>${esc(m.text.length > 70 ? m.text.slice(0, 70) + "..." : m.text)}</div>`;
+  c.onclick = () => zoomTo(m.cid);
+  c.oncontextmenu = e => { e.preventDefault(); showMenu(e, m.cid, [["Zoom to it on the map", () => zoomTo(m.cid)], ["Show in table", () => focusRow(m.cid)]]); };
+  $("#gallery").prepend(c);
+  const mk = markers[m.cid];
+  if (mk) { mk.setStyle({ fillColor: css(m.ok ? (m.suspect ? "--warn" : "--ok") : "--bad") }); mk.props.measured_width_m = parseFloat(m.text) || null; }
+}
+
+function showDownloads(names) {
+  let html = `<b>${esc(region)}</b>`;
+  html += `<div class="dl">` + names.map(n => `<a href="/api/download/${region}/${n}">${n}</a>`).join("") +
+          (names.length ? `<a href="/api/download/${region}/all.zip">all files (zip)</a>` : "") + `</div>`;
+  if (!names.length) html += `<p class="note">No output files yet.</p>`;
+  $("#results").innerHTML = html;
+}
+
+init();
+</script>
+</body>
+</html>

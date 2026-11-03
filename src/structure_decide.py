@@ -35,14 +35,15 @@ never change it):
       the road data (surface) says so -> kept
       (MINOR_PAVED); unknown -> kept, flag SURFACE_UNKNOWN
   S2  kept road, no measured width                        -> PENDING_SURVEY
-  S3  crossing angle below --skew-flag-deg (same as R7)   -> flag HIGH_SKEW, span_m left empty
-                                                             whatever the structure turns out to be
   S4  more than one road (divided road per R5, or two+    -> DUAL_DESIGNER_DECISION: one box over the
       roads in the combined layout)                          whole width, a split (twin-cell) box and
                                                              a bridge are all worked out;
                                                              structure_suggested = first that fits
   S5  one road, opening fits a standard box               -> BOX, square to the road (no span)
   S6  one road, opening wider than any box                -> BRIDGE, span_m = opening / sin(angle)
+
+The crossing angle is reported with every crossing (angle_deg, skew_angle_deg), so there is no
+separate high-skew flag: a bridge's span always carries the skew, opening / sin(angle).
 
 opening_width_m is the combined width plus --edge-buffer-m on each side.
 Every box is the smallest standard size (--box-sizes) whose span covers the
@@ -342,15 +343,10 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
         flags.append("NEAR_JUNCTION")
     if any(pd.notna(m.get("nearby_crossing_id")) and m["nearby_crossing_id"] not in ids for m in members):
         flags.append("NEARBY_CROSSING")  # R8 pair not already folded in by R9
-    high_skew = angle < args.skew_flag_deg
-    if high_skew:
-        flags.append("HIGH_SKEW")
     dual_r5 = any(_is_true(m.get("dual_carriageway")) for m in members)
     live = any(pd.notna(m.get("n_transects")) for m in members)  # an imagery pass ran and could have seen it
     if widths and live and dual_r5 != (len(widths) > 1):
         flags.append("DUAL_MISMATCH")
-    skew_note = (f"; span left empty - crossing angle {angle:g} deg is below {args.skew_flag_deg:g} deg "
-                 f"(realign the road, or the designer sets the span)") if high_skew else ""
 
     clearance = args.clearance_m if major else args.minor_clearance_m
     out["clearance_m"] = clearance
@@ -392,15 +388,14 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
             parts.append("split box not evaluated - carriageways not separated in the imagery "
                          "(fill cw1/median/cw2 in a --measured-csv recheck)")
 
-        if not high_skew:
-            out["span_m"] = along_track(opening, angle)
-            parts.append(f"bridge span along track {out['span_m']} m")
-            if len(widths) > 1:
-                each = [along_track(w + 2 * b, angle) for w in widths]
-                out["span_each_m"] = " | ".join(f"{s:g}" for s in each)
-                parts[-1] += f" (or {out['span_each_m']} m as a separate structure per road)"
+        out["span_m"] = along_track(opening, angle)
+        parts.append(f"bridge span along track {out['span_m']} m")
+        if len(widths) > 1:
+            each = [along_track(w + 2 * b, angle) for w in widths]
+            out["span_each_m"] = " | ".join(f"{s:g}" for s in each)
+            parts[-1] += f" (or {out['span_each_m']} m as a separate structure per road)"
         out["structure_suggested"] = "BOX" if single is not None else "BOX_SPLIT" if twin is not None else "BRIDGE"
-        return finish("DUAL_DESIGNER_DECISION", "S4", "; ".join(parts) + skew_note)
+        return finish("DUAL_DESIGNER_DECISION", "S4", "; ".join(parts))
 
     measured = widths[0]
     opening_note = f"{merged_note}opening {opening:.2f} m (measured {measured:.2f} + 2 x {b:g} m buffer)"
@@ -413,15 +408,13 @@ def decide(rep, layout, members: list, boxes: pd.DataFrame, args) -> dict:
     box = pick_box(boxes, opening, clearance)
     if box is not None:
         out["box_size"] = box_label(box)
-        squared = "; crossing is skewed - the road is squared up to the box" if high_skew else ""
         return finish("BOX", "S5", f"{opening_note} fits standard box {out['box_size']} "
-                                   f"(clear height >= {clearance:g} m); a box is square to the road, so no span{squared}")
+                                   f"(clear height >= {clearance:g} m); a box is square to the road, so no span")
 
-    if not high_skew:
-        out["span_m"] = along_track(opening, angle)
+    out["span_m"] = along_track(opening, angle)
     too_wide = (f"wider than the largest standard box span ({max_span:g} m)" if max_span is not None
                 else f"no standard box clears {clearance:g} m")
-    span_note = f"; span along track {out['span_m']} m at {angle:g} deg" if out["span_m"] is not None else skew_note
+    span_note = f"; span along track {out['span_m']} m at {angle:g} deg"
     return finish("BRIDGE", "S6", f"{opening_note} is {too_wide}{span_note}")
 
 
@@ -546,9 +539,7 @@ def parse_args():
                      help="R9: only merge roads whose crossing angles differ by at most this (i.e. roughly parallel)")
     ap.add_argument("--thin-m", type=float, default=100.0,
                      help="R12: a minor road this close to a higher-ranked crossing is diverted to it (MERGED). 0 to disable")
-    ap.add_argument("--edge-buffer-m", type=float, default=1.0, help="Added to the combined width on each side")
-    ap.add_argument("--skew-flag-deg", type=float, default=45.0,
-                     help="S3: below this crossing angle, flag HIGH_SKEW and leave span_m empty (same threshold as R7)")
+    ap.add_argument("--edge-buffer-m", type=float, default=0.0, help="Added to the combined width on each side")
     ap.add_argument("--clearance-m", type=float, default=5.5,
                      help="Vertical clearance a box must give a major road (org bridge-list template: major road 5.5 m)")
     ap.add_argument("--minor-clearance-m", type=float, default=4.0,

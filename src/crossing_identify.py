@@ -126,33 +126,43 @@ def prepare_alignment(args) -> gpd.GeoDataFrame:
         base_id = str(row[id_field]) if id_field else f"seg{i + 1}"
         geom = row.geometry.intersection(boundary_geom) if boundary_geom is not None else row.geometry
         for part in flatten_geom(geom):
-            rows.append({"base_id": base_id, "geometry": part})
+            # the whole input line too: chainage is measured along it, so clipping to a state
+            # doesn't restart it at the state border
+            rows.append({"base_id": base_id, "order": i, "geometry": part, "source_line": row.geometry})
 
     if not rows:
         raise SystemExit("No alignment geometry falls inside the given boundary.")
 
     out = gpd.GeoDataFrame(rows, geometry="geometry", crs=4326)
+    source = gpd.GeoSeries(out.pop("source_line"), crs=4326)
 
     centroid = out.geometry.union_all().centroid
     epsg = args.epsg or get_utm_epsg(centroid.x, centroid.y)
     print(f"working CRS: EPSG:{epsg}" + (" (auto-detected UTM zone)" if not args.epsg else ""))
 
     out = out.to_crs(epsg)
+    source = source.to_crs(epsg)
     out["length_m"] = out.geometry.length
+    # chainage at each part's first vertex: the start chainage plus the distance along the input
+    # line, in the direction it was drawn (its first vertex is the start chainage)
+    out["chainage_start_m"] = [round(args.start_chainage_m + src.project(Point(part.coords[0])), 3)
+                               for part, src in zip(out.geometry, source)]
     before = len(out)
-    out = out[out["length_m"] >= args.min_segment_m].reset_index(drop=True)
+    keep = (out["length_m"] >= args.min_segment_m).to_numpy()
+    out = out[keep].reset_index(drop=True)
     dropped = before - len(out)
     if dropped:
         print(f"dropped {dropped} sliver part(s) under {args.min_segment_m:.0f} m (boundary-clip artefacts)")
     if out.empty:
         raise SystemExit("Nothing left after dropping slivers - check --min-segment-m or the input geometry.")
 
-    out = out.sort_values("base_id").reset_index(drop=True)
+    out = out.sort_values(["order", "chainage_start_m"]).drop(columns="order").reset_index(drop=True)
     out["part_index"] = out.groupby("base_id").cumcount() + 1
     parts_per_id = out.groupby("base_id")["part_index"].transform("max")
     out["align_name"] = out["base_id"].where(parts_per_id == 1, out["base_id"] + "-part" + out["part_index"].astype(str))
     out["section_id"] = out["base_id"]
     out.insert(0, "align_id", range(1, len(out) + 1))
+    out["chainage_epsg"] = epsg  # chainage is measured in this CRS - anything that draws it (the map ticks) must use it too
     out.attrs["epsg"] = epsg
 
     total_km = out["length_m"].sum() / 1000
@@ -336,7 +346,7 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
             if not near_ids:
                 continue
             align_row = min((align.iloc[i] for i in near_ids), key=lambda r: r.geometry.distance(pt))
-            chainage_m = align_row.geometry.project(pt)
+            chainage_m = align_row["chainage_start_m"] + align_row.geometry.project(pt)
             a_brg = tangent_bearing(align_row.geometry, pt)
             r_brg = tangent_bearing(rgeom, pt)
             theta = acute_angle(a_brg, r_brg)
@@ -344,7 +354,7 @@ def find_candidates(align: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, align_barr
                 "align_id": align_row["align_id"],
                 "align_name": align_row["align_name"],
                 "section_id": align_row["section_id"],
-                "chainage_m": round(chainage_m, 1),
+                "chainage_m": round(chainage_m, 3),
                 "angle_deg": round(theta, 1),
                 "highway": road.get("highway"),
                 "ref": road.get("ref"),
@@ -447,8 +457,7 @@ def build_barrier_graph(roads: gpd.GeoDataFrame, align: gpd.GeoDataFrame, align_
     return G
 
 
-def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, junction_flag_m: float,
-                            skew_flag_deg: float) -> gpd.GeoDataFrame:
+def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, junction_flag_m: float) -> gpd.GeoDataFrame:
     # the two halves' nodes at each crossing point: the nearest on each side within 0.5 m, rather
     # than an exact 0.1 m-rounded key - a rounding miss would otherwise drop a real crossing as
     # R2. Nearest, because another road can cross the alignment a few decimetres away
@@ -478,7 +487,6 @@ def apply_connectivity_rule(cand: gpd.GeoDataFrame, G: nx.Graph, junction_flag_m
     cand["near_junction"] = cand.geometry.apply(
         lambda pt: bool(jtree is not None and len(jtree.query(pt.buffer(junction_flag_m))) > 0)
     )
-    cand["skewed"] = cand["angle_deg"] < skew_flag_deg
     return cand
 
 
@@ -572,6 +580,9 @@ def parse_args():
     ap.add_argument("--roads-glob", default=DEFAULT_ROADS_GLOB,
                      help="Glob for local NIC road parquet file(s) to load and crop to the corridor")
     ap.add_argument("--min-segment-m", type=float, default=50.0, help="Drop alignment slivers shorter than this after clipping")
+    ap.add_argument("--start-chainage-m", type=float, default=0.0,
+                     help="Chainage (m) at the first vertex of each alignment line; chainage increases in the direction "
+                          "the line was drawn")
     ap.add_argument("--epsg", type=int, default=None, help="Metric CRS to work in. Default: auto-detect UTM zone from the data's centroid")
     ap.add_argument("--region", default=None,
                      help="Name for this run's files (output/<region>_crossings.geojson, shared/roads_<region>.geojson, "
@@ -586,7 +597,6 @@ def parse_args():
     ap.add_argument("--corridor-output", default=None, help="Where to save the corridor polygon")
     ap.add_argument("--dual-merge-tol-m", type=float, default=30.0, help="R5: merge distance for same-ref dual-carriageway crossings")
     ap.add_argument("--junction-flag-m", type=float, default=50.0, help="R6: flag a crossing within this of an existing junction")
-    ap.add_argument("--skew-flag-deg", type=float, default=45.0, help="R7: flag a crossing angle below this")
     ap.add_argument("--nearby-crossing-flag-m", type=float, default=40.0, help="R8: flag another crossing on the same segment within this distance")
     ap.add_argument("--osm", action=argparse.BooleanOptionalAction, default=True,
                      help="Add OpenStreetMap roads (Geofabrik extracts, see osm_roads.py) where the NIC data has none")
@@ -660,14 +670,14 @@ def main() -> None:
         cand = gpd.GeoDataFrame(pd.concat([cand, extra], ignore_index=True), geometry="geometry", crs=cand.crs)
 
     G = build_barrier_graph(roads, align, align_barrier)
-    cand = apply_connectivity_rule(cand, G, args.junction_flag_m, args.skew_flag_deg)
+    cand = apply_connectivity_rule(cand, G, args.junction_flag_m)
     cand = apply_identification_filters(cand, args)
     cand = init_width_columns(cand)
 
-    # NIC crossings first, numbered as they always were; OSM crossings after them - so adding OSM never
-    # renumbers a NIC crossing, and measure_width_sam3.py --resume can reuse every width already measured
-    cand["_osm"] = cand["road_source"] == "osm"
-    cand = cand.sort_values(["_osm", "align_id", "chainage_m"]).drop(columns="_osm").reset_index(drop=True)
+    # numbered in chainage order (align_id follows the input line order, then chainage along it), so the
+    # number in a crossing ID increases with chainage. measure_width_sam3.py --resume matches earlier
+    # widths by location, not ID, so a renumbering never attaches a width to the wrong crossing
+    cand = cand.sort_values(["align_id", "chainage_m"]).reset_index(drop=True)
     cand.insert(0, "crossing_id", [f"{args.id_prefix}-{i + 1:03d}" for i in range(len(cand))])
     cand = flag_nearby_crossings(cand, args.nearby_crossing_flag_m)  # needs metres, before reprojecting to WGS84
     cand_wgs = cand.to_crs(4326)

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rail-Road Crossing Detection - Help</title>
+<script>/* theme before first paint: saved choice, else the system setting */
+(function () { var t = null; try { t = localStorage.getItem("rrcd.theme"); } catch (e) {}
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = t; })();</script>
+<style>
+:root {
+  --blue-900: #2F4858; --blue-800: #2c5a7a; --blue-700: #33658A; --blue-600: #3f7ea6; --blue-500: #55DDE0;
+  --blue-300: #8de7e9; --blue-200: #a6e9eb; --blue-100: #cdf3f4; --blue-50: #e9fafa;
+  --orange: #F26419; --amber: #F6AE2D;
+  --ink: #263b49; --muted: #5a7080; --line: #c7e6e8; --review: #fff1df;
+  --bg: #eef7f8; --surface: #ffffff; --side-top: #e2f1f3; --side-bottom: #eef7f8; --review-line: #f6c79a;
+  --header-grad: linear-gradient(100deg, #2F4858 0%, #33658A 62%, #3f86ad 100%);
+}
+:root[data-theme="dark"] {
+  --blue-900: #d3e9ef; --blue-800: #b5d8e6; --blue-700: #7fb6d9; --blue-600: #6aa7cf;
+  --blue-200: #2e5568; --blue-100: #23404f; --blue-50: #1b3240;
+  --ink: #dbe8ee; --muted: #93a9b6; --line: #2b4452; --review: #3b2a1b; --review-line: #6b4a2c;
+  --bg: #111b21; --surface: #192a34; --side-top: #15232b; --side-bottom: #111b21;
+  --header-grad: linear-gradient(100deg, #18262f 0%, #22445c 62%, #2c5a7a 100%);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.6; color: var(--ink); background: var(--bg); }
+a { color: var(--blue-700); }
+.app-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 76px; padding: 0 22px; color: #fff;
+  background: var(--header-grad); box-shadow: 0 3px 14px rgba(47, 72, 88, 0.35);
+  position: sticky; top: 0; z-index: 20; }
+.brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.brand .logo { width: 46px; height: 46px; padding: 7px; background: #fff; border-radius: 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28); flex-shrink: 0; }
+.page-title h3 { margin: 0; font-size: 25px; font-weight: 800; letter-spacing: 0.3px; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+.tagline { margin-top: 2px; font-size: 12.5px; color: rgba(255, 255, 255, 0.88); }
+a.btn.on-dark { font-weight: 600; font-size: 13px; color: #fff; text-decoration: none; padding: 6px 13px; border-radius: 9px; background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.45); box-shadow: 0 2px 0 rgba(0, 0, 0, 0.18), 0 4px 10px rgba(0, 0, 0, 0.18); white-space: nowrap; }
+a.btn.on-dark:hover, button.on-dark:hover { background: rgba(255, 255, 255, 0.3); }
+button.on-dark { font: inherit; font-weight: 600; font-size: 13px; color: #fff; padding: 6px 13px; border-radius: 9px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.18); border: 1px solid rgba(255, 255, 255, 0.45); box-shadow: 0 2px 0 rgba(0, 0, 0, 0.18), 0 4px 10px rgba(0, 0, 0, 0.18); }
+.header-actions { display: flex; gap: 10px; align-items: center; }
+.wrap { display: grid; grid-template-columns: 250px 1fr; max-width: 1200px; margin: 0 auto; }
+nav { position: sticky; top: 76px; height: calc(100vh - 76px); overflow-y: auto; padding: 18px 16px; font-size: 13px;
+  background: linear-gradient(180deg, var(--side-top) 0%, var(--side-bottom) 100%); border-right: 1px solid var(--line); }
+nav b { color: var(--blue-900); }
+nav a { display: block; color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 7px; }
+nav a:hover { color: var(--blue-900); background: var(--blue-100); }
+nav .sub { padding-left: 20px; }
+main { padding: 24px 34px 80px; min-width: 0; }
+h1 { font-size: 24px; font-weight: 800; margin: 0 0 4px; color: var(--blue-900); }
+h2 { font-size: 17px; font-weight: 700; margin: 30px 0 10px; padding: 8px 14px; color: #fff; border-radius: 10px;
+  background: linear-gradient(90deg, #33658A, #55DDE0); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
+h3 { font-size: 15px; margin: 20px 0 6px; color: var(--blue-800); }
+.lead { color: var(--muted); margin-top: 0; }
+code { font: 12.5px ui-monospace, Consolas, monospace; background: var(--blue-50); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
+table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; margin: 8px 0 14px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; box-shadow: 0 1px 2px rgba(47, 72, 88, 0.08); }
+th, td { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+th { color: var(--blue-900); background: linear-gradient(180deg, var(--blue-50), var(--blue-100)); }
+tr:last-child td { border-bottom: none; }
+th:last-child, td:last-child { border-right: none; }
+.rid { display: inline-block; min-width: 28px; text-align: center; border-radius: 5px; background: var(--blue-100); border: 1px solid var(--blue-200);
+  color: var(--blue-900); font: 700 12px ui-monospace, Consolas, monospace; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 10px 0; }
+.box.rev { background: var(--review); border-color: var(--review-line); box-shadow: inset 4px 0 0 var(--orange); }
+@media (max-width: 860px) {
+  .app-header { height: auto; padding: 10px 14px; position: static; }
+  .page-title h3 { font-size: 19px; }
+  .wrap { grid-template-columns: 1fr; }
+  nav { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+  main { padding: 20px 16px 60px; }
+}
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="12" y="0.5" width="8" height="31" rx="1.5" fill="#8a9aab"/><path d="M16 2.5v4M16 10.5v3M16 18.5v3M16 25.5v4" stroke="#ffffff" stroke-width="1.4"/><path d="M4.5 9.5v13M8.5 9.5v13M23.5 9.5v13M27.5 9.5v13" stroke="#55DDE0" stroke-width="2.2"/><path d="M1 12.5h30M1 19.5h30" stroke="#2F4858" stroke-width="2.4"/></svg>
+    <div>
+      <div class="page-title"><h3>Rail-Road Crossing Detection</h3></div>
+      <div class="tagline">Help and documentation</div>
+    </div>
+  </div>
+  <div class="header-actions">
+    <button class="on-dark" id="themeBtn" title="Switch between the light and dark theme">&#x263E; Dark</button>
+    <a class="btn on-dark" href="/">&larr; Back to the tool</a>
+  </div>
+</header>
+<div class="wrap">
+<nav>
+  <b>Rail-Road Crossing Detection</b>
+  <a href="#overview">Overview</a>
+  <a href="#quick">Quick start</a>
+  <a href="#inputs">Inputs</a>
+  <a class="sub" href="#in-align">1 Alignment &amp; chainage</a>
+  <a class="sub" href="#in-area">2 Area and run name</a>
+  <a class="sub" href="#in-detect">3 Crossing detection</a>
+  <a class="sub" href="#in-near">4 Nearby &amp; divided roads</a>
+  <a class="sub" href="#in-measure">5 Width measurement</a>
+  <a class="sub" href="#in-structure">6 Structure decision</a>
+  <a href="#rules">Detection rules (R)</a>
+  <a href="#srules">Structure rules (S)</a>
+  <a href="#chainage">Chainage and crossing IDs</a>
+  <a href="#output">Output table</a>
+  <a href="#review">What needs review</a>
+  <a href="#map">Map</a>
+  <a href="#files">Output files</a>
+  <a href="#basis">Basis and validation</a>
+  <a href="#limits">Limitations</a>
+  <a href="/">&larr; Back to the tool</a>
+</nav>
+<main>
+<h1>Rail-Road Crossing Detection</h1>
+<p class="lead">Finds every place a road crosses a railway alignment, measures each road's width from satellite imagery, and decides the structure for each: a box culvert, a bridge with its span along the track, or no structure because the road can be re-routed.</p>
+
+<h2 id="overview">Overview</h2>
+<p>No level crossings are permitted on new lines, so every road the alignment cuts needs a grade-separated structure or a diversion. The tool runs three steps, one after another:</p>
+<table>
+<tr><th>Step</th><th>What it does</th><th>Script</th></tr>
+<tr><td>Find crossings</td><td>Loads the road network around the alignment (NIC road data, plus OpenStreetMap where NIC has none), finds every point where a road crosses the line, its chainage and crossing angle, the road class, and whether the road is present on both sides (rules R1-R11).</td><td><code>crossing_identify.py</code></td></tr>
+<tr><td>Measure widths</td><td>For each crossing, fetches a satellite image crop, segments the road with SAM3, measures its width on 5 lines across it, reads the full road corridor (carriageway | median | carriageway), and judges paved or unpaved.</td><td><code>measure_width_sam3.py</code></td></tr>
+<tr><td>Decide structures</td><td>Merges crossings that are one road corridor, then decides and sizes the structure for each (rules S0-S6, R9, R12).</td><td><code>structure_decide.py</code></td></tr>
+</table>
+<p>Re-running only <b>Decide structures</b> takes seconds, so thresholds can be tried freely once the widths are measured.</p>
+
+<h2 id="quick">Quick start</h2>
+<ol>
+<li><b>Alignment</b>: keep the default DFCC line or upload your own (GeoJSON, KML/KMZ, GeoPackage, zipped shapefile). For a CAD export, pick the alignment layer in "Use only these lines" and check the dashed preview lands in the right place; if not, choose another UTM zone.</li>
+<li>Enter the <b>start chainage</b> of the line, in metres.</li>
+<li><b>Area and run name</b>: clip to a state or use the whole line; give the run a name.</li>
+<li>Adjust any rule (every input shows a short explanation when you hover over it), tick the steps to run, press <b>Run</b>.</li>
+<li>Watch the crossings appear on the map, the SAM3 crops in <b>SAM3 results</b>, and the decisions in the <b>Crossings</b> table. Rows highlighted in orange need a person to look at them.</li>
+<li>Download the results from <b>Downloads</b>. Use <b>Open a finished run</b> to look at an earlier run again without re-running it.</li>
+</ol>
+<p>Use the <b>Hide</b> button at the top of the inputs panel for more room; <b>Inputs</b> on the map brings it back.</p>
+
+<h2 id="inputs">Inputs</h2>
+
+<h3 id="in-align">1 Alignment and chainage</h3>
+<table>
+<tr><th>Input</th><th>Meaning</th></tr>
+<tr><td>Default / Upload</td><td>The railway centreline. Any line file geopandas reads. Lines only - points and polygons are ignored.</td></tr>
+<tr><td>Coordinate system</td><td>Shown when the file is in a UTM zone. CAD exports are often labelled with the wrong zone; each option re-reads the coordinates in another zone and the preview shows where the line lands.</td></tr>
+<tr><td>Use only these lines</td><td>Keeps one value of one attribute (e.g. <code>Layer = C-ALIG-DG-LINE</code>), dropping labels, ticks and text that CAD exports mix in. The longest layer is pre-selected.</td></tr>
+<tr><td>Start chainage (m)</td><td>Chainage at the first vertex of the line, up to 3 decimals. See <a href="#chainage">Chainage and crossing IDs</a>.</td></tr>
+</table>
+
+<h3 id="in-area">2 Area and run name</h3>
+<table>
+<tr><th>Input</th><th>Meaning</th></tr>
+<tr><td>Clip to a state / Whole line</td><td>Process only the part of the line inside one state, or all of it.</td></tr>
+<tr><td>Run name</td><td>Every output file is named after it (<code>output/&lt;name&gt;_structures.csv</code> ...). Running <i>Find crossings</i> again under the same name overwrites that run.</td></tr>
+<tr><td>Crossing ID prefix</td><td>e.g. <code>MH</code> gives MH-001, MH-002 ... Default: the state's code.</td></tr>
+</table>
+
+<h3 id="in-detect">3 Crossing detection</h3>
+<table>
+<tr><th>Input</th><th>Rule</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Road search corridor</td><td></td><td>2 km</td><td>Roads are read this far either side of the line. Only roads that actually cross the line become crossings.</td></tr>
+<tr><td>Ignore roads crossing under</td><td><span class="rid">R10</span></td><td>15&deg;</td><td>A road meeting the line at a smaller angle runs along it, not across it.</td></tr>
+<tr><td>Flag if a junction within</td><td><span class="rid">R6</span></td><td>50 m</td><td>Flags crossings near an existing road junction.</td></tr>
+<tr><td>Road classes that never get a crossing</td><td><span class="rid">R11</span></td><td>TRK</td><td>Cart tracks and the like.</td></tr>
+<tr><td>Add OpenStreetMap roads</td><td></td><td>on</td><td>Adds OSM roads (Geofabrik extracts, downloaded once) where NIC has none.</td></tr>
+<tr><td>Same road if within ... and angle within</td><td></td><td>60 m, 20&deg;</td><td>An OSM crossing this close to a NIC crossing, at a similar angle, is the same road; the NIC one is kept.</td></tr>
+<tr><td>Drop alignment slivers under</td><td></td><td>50 m</td><td>Tiny pieces left by clipping at a state border.</td></tr>
+</table>
+
+<h3 id="in-near">4 Nearby and divided-road crossings</h3>
+<p>All the rules that decide whether crossings close together are one road, or need one structure between them, are in this one group.</p>
+<table>
+<tr><th>Input</th><th>Rule</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Same route number: one crossing within</td><td><span class="rid">R5</span></td><td>30 m</td><td>Two crossings sharing a route number (both NH48) are two carriageways of one road: one crossing.</td></tr>
+<tr><td>Flag another crossing within</td><td><span class="rid">R8</span></td><td>40 m</td><td>Two crossings this close are flagged for review (same road mapped twice, or a parallel track).</td></tr>
+<tr><td>One structure if roads within / parallel within</td><td><span class="rid">R9</span></td><td>20 m, 15&deg;</td><td>Roads whose edges, as measured in the imagery, are this close and roughly parallel form one road corridor and get one structure over their combined width. This is the only rule that joins the two carriageways of a divided highway without a route number.</td></tr>
+<tr><td>Minor road diverted to a crossing within</td><td><span class="rid">R12</span></td><td>100 m</td><td>A minor road this close to a higher-ranked crossing is diverted to it. 0 turns it off.</td></tr>
+</table>
+
+<h3 id="in-measure">5 Width measurement (SAM3)</h3>
+<table>
+<tr><th>Input</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>SAM3 prompt</td><td>road</td><td>The concept segmented in each crop.</td></tr>
+<tr><td>Detection threshold</td><td>0.4</td><td>Confidence needed to accept a road instance.</td></tr>
+<tr><td>Crop half-size</td><td>100 m</td><td>The crop is twice this on a side, centred on the crossing.</td></tr>
+<tr><td>Only first N</td><td>all</td><td>For a quick test.</td></tr>
+<tr><td>Judge paved / unpaved</td><td>on</td><td>Compares SAM3's "asphalt road" and "dirt road" scores at the measured road.</td></tr>
+<tr><td>Resume</td><td>off</td><td>Skips crossings already measured under this run name. Earlier widths are matched by crossing <i>location</i>, so a crossing that was renumbered (another start chainage, OSM on or off) never receives another crossing's width. Progress files from before this change have no locations and are not reused.</td></tr>
+<tr><td>Paved / unpaved margin, workers, prefetch, save every N</td><td></td><td>Fine tuning and speed; the defaults suit an 8 GB GPU.</td></tr>
+</table>
+
+<h3 id="in-structure">6 Structure decision</h3>
+<table>
+<tr><th>Input</th><th>Rule</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Major roads</td><td></td><td>EXP, NH, SH, MDR, ODR</td><td>Always get a structure. Every other class is a minor road.</td></tr>
+<tr><td>Minor road: keep or re-route by</td><td><span class="rid">S1</span></td><td>Width and spacing</td><td>See <a href="#srules">S1</a>.</td></tr>
+<tr><td>Re-route if narrower than</td><td><span class="rid">S1</span></td><td>4 m</td><td>Measured (combined) width.</td></tr>
+<tr><td>Divert if a major crossing within</td><td><span class="rid">S1</span></td><td>500 m</td><td>Distance to the nearest major-road crossing.</td></tr>
+<tr><td>Buffer each side of the road</td><td></td><td>0 m</td><td>Opening width = measured width + this on each side.</td></tr>
+<tr><td>Clearance, major / kept minor road</td><td></td><td>5.5 m / 4.0 m</td><td>Vertical clearance a box must give; sets the box height.</td></tr>
+<tr><td>Review flags</td><td></td><td></td><td>When to flag BORDERLINE, ROAD_OFFSET and CLASS_CHECK (see <a href="#review">What needs review</a>).</td></tr>
+</table>
+
+<h2 id="rules">Detection rules (R)</h2>
+<table>
+<tr><th>Rule</th><th>Condition</th><th>Result</th></tr>
+<tr><td><span class="rid">R1</span></td><td>The road is present on both sides of the alignment.</td><td>Crossing - needs a structure decision.</td></tr>
+<tr><td><span class="rid">R2</span></td><td>The road ends at the alignment (one side only).</td><td>No crossing.</td></tr>
+<tr><td><span class="rid">R5</span></td><td>Two crossings within 30 m sharing a route number.</td><td>One crossing (divided road).</td></tr>
+<tr><td><span class="rid">R6</span></td><td>A road junction within 50 m.</td><td>Flag NEAR_JUNCTION.</td></tr>
+<tr><td><span class="rid">R8</span></td><td>Another crossing within 40 m on the same piece of line.</td><td>Flag for review.</td></tr>
+<tr><td><span class="rid">R9</span></td><td>Measured roads within 20 m edge to edge and roughly parallel.</td><td>One structure; the others MERGED.</td></tr>
+<tr><td><span class="rid">R10</span></td><td>Crossing angle below 15&deg;.</td><td>No crossing (runs along the line).</td></tr>
+<tr><td><span class="rid">R11</span></td><td>Road class excluded (default TRK).</td><td>No crossing.</td></tr>
+<tr><td><span class="rid">R12</span></td><td>Minor road within 100 m of a higher-ranked crossing.</td><td>MERGED, diverted to it.</td></tr>
+</table>
+<p>R3 and R4 were retired: NIC road data is a merge of state exports with gaps between them, so a road that is not joined to the wider network is a data gap, not a missing road.</p>
+
+<h2 id="srules">Structure rules (S)</h2>
+<p>The first rule that matches sets the structure; flags add up and never change it.</p>
+<table>
+<tr><th>Rule</th><th>Condition</th><th>Result</th></tr>
+<tr><td><span class="rid">S0</span></td><td>No crossing (R2, R10, R11).</td><td>NONE</td></tr>
+<tr><td><span class="rid">S1</span></td><td>Minor road narrower than 4 m, within 500 m of a major-road crossing, or with no measured width (width-and-spacing rule); or unpaved (surface rule).</td><td>NIL_REROUTE - re-routed to the nearest structure. Otherwise the minor road is kept and sized like a major one, with the minor clearance.</td></tr>
+<tr><td><span class="rid">S2</span></td><td>Kept road with no measured width.</td><td>PENDING_SURVEY</td></tr>
+<tr><td><span class="rid">S4</span></td><td>More than one road (divided road, or 2+ roads in the measured layout).</td><td>DUAL_DESIGNER_DECISION: one box over the whole width, a twin-cell box and a bridge are all worked out; the first that fits is suggested.</td></tr>
+<tr><td><span class="rid">S5</span></td><td>One road, opening fits a standard box (RDSO DFC loading table, <code>config/box_sizes.csv</code>).</td><td>BOX - smallest standard size clearing the required height. A box is square to the road, so no span.</td></tr>
+<tr><td><span class="rid">S6</span></td><td>One road, opening wider than the largest standard box.</td><td>BRIDGE, span along the track = opening &divide; sin(crossing angle).</td></tr>
+</table>
+<p>The crossing angle (and skew = 90&deg; &minus; angle) is reported for every crossing, so there is no separate high-skew flag; a bridge's span always includes the skew.</p>
+
+<h2 id="chainage">Chainage and crossing IDs</h2>
+<ul>
+<li>Chainage is measured <b>along the alignment line in the direction it was drawn</b>: its first vertex is the start chainage you enter, and chainage increases towards its last vertex. If the line was digitised the other way round, reverse it in your GIS before uploading.</li>
+<li>Clipping to a state does not restart chainage: it is measured from the start of the whole line, so the same crossing has the same chainage whether you run one state or the whole line.</li>
+<li>With several lines (sections) in the file, each starts at the start chainage.</li>
+<li>Chainage is written to 3 decimals (millimetres) and shown as <code>km+metres</code>, e.g. <code>12+345.678</code>.</li>
+<li>The map shows chainage marks every 100 m when zoomed in (from street level), every 500 m, 1 km or 5 km further out.</li>
+<li>Crossing IDs are numbered in chainage order: the number in the ID increases with chainage along each line, lines in the order they appear in the file.</li>
+</ul>
+
+<h2 id="output">Output table</h2>
+<p>The <b>Crossings</b> tab under the map lists every crossing found, with the decision once the structures step has run.</p>
+<ul>
+<li><b>Sort</b>: click a column heading (click again to reverse).</li>
+<li><b>Find on the map</b>: right-click a row and choose <i>Zoom to it on the map</i> (double-click does the same).</li>
+<li><b>Find in the table</b>: right-click a crossing on the map and choose <i>Show in table</i>, or use <i>show in table</i> in its popup.</li>
+<li><b>Show, hide and reorder columns</b>: <i>Columns</i> opens the list - tick to show, drag to reorder. You can also drag a column heading sideways. <i>Reset</i> restores the default set. Your choice is remembered in this browser.</li>
+<li><b>Only those needing review</b> shows just the highlighted rows.</li>
+</ul>
+
+<h2 id="review">What needs review</h2>
+<div class="box rev">Rows highlighted in orange need a person to look at them before the structure list is used. The <i>Needs review</i> column says why.</div>
+<table>
+<tr><th>Reason</th><th>Why</th><th>What to do</th></tr>
+<tr><td>no width - survey it (PENDING_SURVEY)</td><td>A kept road SAM3 could not measure.</td><td>Measure it on imagery or in the field.</td></tr>
+<tr><td>divided road - designer decides</td><td>Two or more roads at the crossing.</td><td>Choose one box, a twin-cell box or a bridge.</td></tr>
+<tr><td>width suspect</td><td>The 5 width lines disagree, or the width is implausible for the road class.</td><td>Check the QA crop (map popup or SAM3 results).</td></tr>
+<tr><td>opening close to the largest box</td><td>Box or bridge could go either way.</td><td>Confirm the width.</td></tr>
+<tr><td>road in imagery away from road data</td><td>The road meets the track more than 10 m from where the road data says.</td><td>Check the QA crop and the chainage.</td></tr>
+<tr><td>divided road? data and imagery disagree</td><td>Road data says divided, imagery shows one road, or the other way.</td><td>Check the crop.</td></tr>
+<tr><td>minor road wider than its class</td><td>Possibly mis-classed in the road data.</td><td>Confirm the class.</td></tr>
+<tr><td>combined layout approximate</td><td>Some merged roads had no imagery edges.</td><td>Check the combined width.</td></tr>
+<tr><td>another crossing close by (R8)</td><td>Same road twice, or a parallel track.</td><td>Decide whether it is one structure or two.</td></tr>
+</table>
+
+<h2 id="map">Map</h2>
+<ul>
+<li>Crossings are coloured by structure (legend at the bottom right) once decided; before that, green = measured, grey = not yet measured or no crossing.</li>
+<li>Click a crossing for its details and its SAM3 QA crop.</li>
+<li>The layer control (top right) switches to satellite imagery and toggles the alignment, chainage marks, crossings, structures and the measured width lines.</li>
+</ul>
+
+<h2 id="files">Output files</h2>
+<table>
+<tr><th>File</th><th>Contents</th></tr>
+<tr><td><code>&lt;run&gt;_structures.geojson / .csv</code></td><td>The structure register: every crossing with its decision, every attribute.</td></tr>
+<tr><td><code>&lt;run&gt;_structure_geometry.geojson</code></td><td>The measured road width drawn to scale at each structure, for the drawing.</td></tr>
+<tr><td><code>&lt;run&gt;_crossings.geojson</code></td><td>The crossings found, before measurement.</td></tr>
+<tr><td><code>&lt;run&gt;_crossings_final_gl.csv</code></td><td>Crossings with their measured widths.</td></tr>
+<tr><td><code>&lt;run&gt;_width_survey.csv</code></td><td>Raw SAM3 measurement data.</td></tr>
+</table>
+
+<h2 id="basis">Basis and validation</h2>
+<ul>
+<li><b>No level crossings on new lines</b> - Railway Board directive (August 2023): every road the line cuts gets a grade-separated structure or a diversion.</li>
+<li><b>Road classes</b> follow the IRC hierarchy (Expressway, NH, SH, MDR, ODR, Village road), read from the NIC road data's class columns or OSM tags. The class decides major vs minor and flags implausible widths; it never sets the design width.</li>
+<li><b>Widths</b> come only from SAM3 (Meta's Segment Anything 3, promptable concept segmentation) on satellite imagery - measured on 5 lines across the road; a SUSPECT measurement is labelled, never replaced.</li>
+<li><b>Box sizes</b> are the standard sizes in the RDSO "DFC Loading" box culvert tables (single cell 1-6 m, twin cell 4-6 m), in <code>config/box_sizes.csv</code>.</li>
+<li><b>Thresholds checked against the designers' structures</b> in Maharashtra, Jharkhand, Chhattisgarh and West Bengal: designers built at 4% of crossings under 15&deg; (R10), 19% of tracks (R11), 16-23% of crossings within 100 m of another (R12), 24% of village roads within 500 m of a major-road crossing against 66% beyond 1 km (S1). The width-and-spacing rule raised decision accuracy from 0.63 to 0.69 over the surface rule.</li>
+</ul>
+
+<h2 id="limits">Limitations</h2>
+<ul>
+<li>Roads missing from both NIC and OSM are missed crossings.</li>
+<li>Imagery date, tree cover and shadow affect SAM3 widths; the SUSPECT flag catches some of this.</li>
+<li>Results support feasibility and design review; they do not replace a field survey.</li>
+</ul>
+</main>
+</div>
+<script>
+const themeBtn = document.getElementById("themeBtn");
+function setTheme(t, save) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.innerHTML = t === "dark" ? "&#x2600; Light" : "&#x263E; Dark";
+  themeBtn.title = t === "dark" ? "Switch to the light theme" : "Switch to the dark theme";
+  if (save) { try { localStorage.setItem("rrcd.theme", t); } catch (e) {} }
+}
+themeBtn.onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+setTheme(document.documentElement.dataset.theme || "light", false);
+</script>
+</body>
+</html>

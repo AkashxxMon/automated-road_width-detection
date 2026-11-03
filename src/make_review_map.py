@@ -87,7 +87,7 @@ def popup_html(row, crops_dir: str) -> str:
       <b>Design width:</b> {fmt(row['design_width_m'], ' m')} ({row['width_source']})<br>
       {structure_bits}
       <b>Span along track:</b> {fmt(row['span_m'], ' m')}<br>
-      <b>Near junction:</b> {row['near_junction']} &middot; <b>Skewed (&lt;45&deg;):</b> {row['skewed']}
+      <b>Near junction:</b> {row['near_junction']} &middot; <b>Chainage:</b> {fmt(row.get('chainage_m'), ' m')}
     </div>
     """
 

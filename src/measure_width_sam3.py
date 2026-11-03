@@ -212,6 +212,7 @@ def finish_crossing(job: dict, crop: tuple, gpu: dict, args) -> tuple[dict, str]
     cid, row, pt_utm, bearing = job["cid"], job["row"], job["pt_utm"], job["bearing"]
     rgb, mpp, zoom = crop
     h, w = rgb.shape[:2]
+    where = {"lon": round(float(row.geometry.x), 7), "lat": round(float(row.geometry.y), 7)}  # --resume matches on this
     center_px = (w / 2.0, h / 2.0)
 
     mask = pick_instance(gpu["road"], center_px, h * w, mpp)
@@ -280,14 +281,14 @@ def finish_crossing(job: dict, crop: tuple, gpu: dict, args) -> tuple[dict, str]
                         + (" - SUSPECT: mask likely over-extended (tree cover/shadow), check QA crop" if suspect else ""),
                "width_iqr_m": round(iqr, 2), "n_transects": len(widths), **combo_cols, **surface,
                "width_p1_x": width_p1_x, "width_p1_y": width_p1_y,
-               "width_p2_x": width_p2_x, "width_p2_y": width_p2_y}
+               "width_p2_x": width_p2_x, "width_p2_y": width_p2_y, **where}
     elif mask is None:
         log = f"  {cid}: no '{args.text}' instance detected at the crossing point"
-        out = {"crossing_id": cid, "measured_width_m": None, "measured_by": None, **surface,
+        out = {"crossing_id": cid, "measured_width_m": None, "measured_by": None, **surface, **where,
                "notes": f"SAM3 found no '{args.text}' instance at the crossing point - check QA crop"}
     else:
         log = f"  {cid}: instance found but all transects failed (likely a divided/complex carriageway shape)"
-        out = {"crossing_id": cid, "measured_width_m": None, "measured_by": None, **surface,
+        out = {"crossing_id": cid, "measured_width_m": None, "measured_by": None, **surface, **where,
                "notes": "SAM3 detected a road instance but the transect walk found no clean crossing - "
                         "check QA crop (often a divided highway, median gap in the mask)"}
     return out, log
@@ -318,9 +319,7 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
     if args.resume:
         for src in (partial_path, Path(args.survey_csv)):
             if src.exists():
-                prev = pd.read_csv(src)
-                done = {r["crossing_id"]: {k: v for k, v in r.items() if pd.notna(v)} for r in prev.to_dict("records")}
-                print(f"resuming: {len(done)} crossing(s) already measured in {src.name}")
+                done = resume_rows(pd.read_csv(src), to_measure, src.name)
                 break
 
     jobs = []
@@ -382,6 +381,7 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
             crop = fut.result() if fut is not None else None
             if crop is None:
                 record(job, {"crossing_id": job["cid"], "measured_width_m": None, "measured_by": None,
+                             "lon": round(float(job["row"].geometry.x), 7), "lat": round(float(job["row"].geometry.y), 7),
                              "notes": "no imagery or road geometry available"},
                        f"  {job['cid']}: skip (no road geometry or no imagery available)")
                 continue
@@ -402,6 +402,30 @@ def measure_all(cross: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, epsg: int, arg
     if partial_path.exists():
         partial_path.unlink()
     return df
+
+def _where_key(lon, lat) -> tuple[int, int]:
+    return round(float(lon) * 1e5), round(float(lat) * 1e5)  # ~1 m
+
+
+def resume_rows(prev: pd.DataFrame, to_measure: gpd.GeoDataFrame, name: str) -> dict[str, dict]:
+    """Earlier measurements, re-keyed to the current crossing IDs by where the crossing is, not by
+    its ID: crossing IDs follow chainage, so a re-run of crossing_identify.py (another start
+    chainage, OSM on or off) can renumber them, and matching by ID would attach a width to the
+    wrong crossing. A progress file written before locations were recorded can't be matched safely,
+    so it isn't reused."""
+    if not {"lon", "lat"} <= set(prev.columns):
+        print(f"  [warn] {name} predates location matching (no lon/lat) - not resumed; every crossing is measured again")
+        return {}
+    by_where = {_where_key(r["lon"], r["lat"]): r for r in prev.to_dict("records")
+                if pd.notna(r.get("lon")) and pd.notna(r.get("lat"))}
+    done = {}
+    for _, row in to_measure.iterrows():
+        r = by_where.get(_where_key(row.geometry.x, row.geometry.y))
+        if r is not None:
+            done[row["crossing_id"]] = {**{k: v for k, v in r.items() if pd.notna(v)}, "crossing_id": row["crossing_id"]}
+    print(f"resuming: {len(done)} of {len(to_measure)} crossing(s) already measured in {name} (matched by location)")
+    return done
+
 
 def resolve_width(row):
     """design_width_m comes from the SAM3 measurement alone - no IRC floor,
